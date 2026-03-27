@@ -1,0 +1,19 @@
+{
+  "name": "Card Sync",
+  "id": "1618662506925340794",
+  "api": "1.0.0",
+  "main": "code.js",
+  "capabilities": [],
+  "enableProposedApi": false,
+  "documentAccess": "dynamic-page",
+  "permissions": ["currentuser"],
+  "editorType": [
+    "figma"
+  ],
+  "ui": "ui.html",
+  "networkAccess": {
+    "allowedDomains": [
+      "https://sheets.googleapis.com"
+    ]
+  }
+}

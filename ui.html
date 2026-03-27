@@ -1,0 +1,1058 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12px;
+    color: #333;
+    background: #fff;
+    overflow-y: auto;
+  }
+  .panel { display: none; padding: 12px; }
+  .panel.active { display: block; }
+
+  h2 { font-size: 14px; margin-bottom: 8px; font-weight: 600; }
+  h3 { font-size: 12px; margin: 12px 0 6px; font-weight: 600; }
+
+  label { display: block; font-size: 11px; font-weight: 500; color: #666; margin-bottom: 3px; }
+  input[type="text"], input[type="password"], select {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 12px;
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  input:focus, select:focus { outline: none; border-color: #18A0FB; }
+
+  button {
+    padding: 6px 12px;
+    border: none;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    font-weight: 500;
+  }
+  .btn-primary { background: #18A0FB; color: #fff; }
+  .btn-primary:hover { background: #0d8de5; }
+  .btn-primary:disabled { background: #ccc; cursor: not-allowed; }
+  .btn-secondary { background: #f0f0f0; color: #333; }
+  .btn-secondary:hover { background: #e0e0e0; }
+  .btn-small { padding: 3px 8px; font-size: 11px; }
+
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 12px;
+    border-bottom: 1px solid #e5e5e5;
+    background: #fafafa;
+  }
+  .header h2 { margin: 0; }
+  .gear-btn {
+    background: none;
+    border: none;
+    font-size: 16px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: #666;
+  }
+  .gear-btn:hover { background: #e5e5e5; }
+
+  .card-type-row {
+    border: 1px solid #e5e5e5;
+    border-radius: 6px;
+    padding: 8px;
+    margin-bottom: 8px;
+    background: #fafafa;
+  }
+  .card-type-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+  .card-type-header .tab-name { font-weight: 600; font-size: 12px; }
+  .toggle-row { display: flex; align-items: center; gap: 6px; }
+
+  .size-readout {
+    font-size: 10px;
+    color: #888;
+    margin-top: 2px;
+  }
+
+  .remove-btn {
+    background: none;
+    border: none;
+    color: #999;
+    font-size: 16px;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+  }
+  .remove-btn:hover { color: #f24822; }
+
+  .btn-row { display: flex; gap: 6px; margin-top: 8px; }
+
+  .hint { font-size: 10px; color: #999; margin-top: -6px; margin-bottom: 8px; }
+
+  /* Progress log */
+  #progress-log {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 11px;
+    padding: 8px;
+    border-radius: 4px;
+    height: 200px;
+    overflow-y: auto;
+    margin-top: 8px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .log-info { color: #d4d4d4; }
+  .log-warn { color: #ffcc02; }
+  .log-error { color: #f44747; }
+
+  .summary-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    border-bottom: 1px solid #f0f0f0;
+    font-size: 12px;
+  }
+
+  .toggle-switch {
+    position: relative;
+    width: 32px;
+    height: 18px;
+  }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-color: #ccc;
+    transition: 0.2s;
+    border-radius: 18px;
+  }
+  .toggle-slider:before {
+    position: absolute;
+    content: "";
+    height: 14px;
+    width: 14px;
+    left: 2px;
+    bottom: 2px;
+    background-color: white;
+    transition: 0.2s;
+    border-radius: 50%;
+  }
+  .toggle-switch input:checked + .toggle-slider { background-color: #18A0FB; }
+  .toggle-switch input:checked + .toggle-slider:before { transform: translateX(14px); }
+</style>
+</head>
+<body>
+
+<!-- ==================== SETTINGS PANEL ==================== -->
+<div id="settings-panel" class="panel">
+  <h2>Settings</h2>
+
+  <label for="sheet-url">Google Sheets URL</label>
+  <input type="text" id="sheet-url" placeholder="Paste your full Google Sheets link" />
+  <div class="hint">Sheet must be shared as "Anyone with the link can view"</div>
+
+  <label for="api-key">Google Sheets API Key</label>
+  <input type="password" id="api-key" placeholder="Enter API key" />
+  <div class="hint">Free — Google Cloud Console → Sheets API → Create Key</div>
+
+  <h3>Card Types</h3>
+  <div id="card-types-list"></div>
+
+  <div class="btn-row">
+    <button class="btn-secondary btn-small" id="add-card-type-btn">+ Add Card Type</button>
+  </div>
+
+  <div class="btn-row" style="margin-top: 12px;">
+    <button class="btn-primary" id="save-settings-btn">Save Settings</button>
+    <button class="btn-secondary" id="back-to-run-btn">Back</button>
+    <span id="save-confirmation" style="font-size:11px; color:#18A0FB; display:none; margin-left:8px; align-self:center;">Saved!</span>
+  </div>
+</div>
+
+<!-- ==================== RUN PANEL ==================== -->
+<div id="run-panel" class="panel">
+  <div class="header">
+    <h2>Card Sync</h2>
+    <button class="gear-btn" id="open-settings-btn" title="Settings">&#9881;</button>
+  </div>
+  <div style="padding: 12px;">
+    <h3>Card Types</h3>
+    <div id="run-summary"></div>
+
+    <button class="btn-primary" id="sync-btn" style="width:100%; margin-top: 12px;">
+      Sync &amp; Build
+    </button>
+
+    <button class="btn-secondary" id="export-btn" style="width:100%; margin-top: 6px;" disabled>
+      Export Print PDFs
+    </button>
+
+    <div id="progress-log"></div>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+var settings = {
+  sheetUrl: '',
+  apiKey: '',
+  cardTypes: [],
+};
+var components = []; // [{name, key}]
+var syncing = false;
+var pendingPdfs = []; // collected PDF groups during export
+
+// ---------------------------------------------------------------------------
+// URL Parsing
+// ---------------------------------------------------------------------------
+
+/** Extract spreadsheet ID from a full Google Sheets URL or bare ID. */
+function extractSpreadsheetId(input) {
+  input = input.trim();
+  // Full URL: https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/...
+  var match = input.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (match) return match[1];
+  // Maybe they pasted just the ID
+  if (/^[a-zA-Z0-9_-]+$/.test(input)) return input;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// CSV Parsing
+// ---------------------------------------------------------------------------
+
+/** Minimal CSV parser that handles quoted fields with commas and newlines. */
+function parseCsv(text) {
+  var rows = [];
+  var row = [];
+  var field = '';
+  var inQuotes = false;
+  var i = 0;
+
+  while (i < text.length) {
+    var ch = text[i];
+
+    if (inQuotes) {
+      if (ch === '"') {
+        if (i + 1 < text.length && text[i + 1] === '"') {
+          field += '"';
+          i += 2;
+        } else {
+          inQuotes = false;
+          i++;
+        }
+      } else {
+        field += ch;
+        i++;
+      }
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+        i++;
+      } else if (ch === ',') {
+        row.push(field);
+        field = '';
+        i++;
+      } else if (ch === '\r') {
+        // skip \r, handle \n next
+        i++;
+      } else if (ch === '\n') {
+        row.push(field);
+        field = '';
+        rows.push(row);
+        row = [];
+        i++;
+      } else {
+        field += ch;
+        i++;
+      }
+    }
+  }
+
+  // Last field/row
+  if (field || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Messaging
+// ---------------------------------------------------------------------------
+function postMsg(type, payload) {
+  parent.postMessage({ pluginMessage: { type: type, payload: payload } }, '*');
+}
+
+window.onmessage = function(event) {
+  var msg = event.data.pluginMessage;
+  if (!msg) return;
+
+  switch (msg.type) {
+    case 'SETTINGS':
+      if (msg.payload) {
+        settings = msg.payload;
+      }
+      applySettingsToUI();
+      if (!msg.payload || !msg.payload.sheetUrl || !msg.payload.apiKey) {
+        showPanel('settings');
+      } else {
+        showPanel('run');
+      }
+      break;
+
+    case 'SETTINGS_SAVED':
+      var confirmEl = document.getElementById('save-confirmation');
+      confirmEl.style.display = 'inline';
+      setTimeout(function() { confirmEl.style.display = 'none'; }, 2000);
+      break;
+
+    case 'COMPONENTS':
+      components = msg.payload || [];
+      rebuildCardTypeSelects();
+      break;
+
+    case 'COMPONENT_SIZE':
+      updateSizeReadout(msg.payload.key, msg.payload.width, msg.payload.height);
+      break;
+
+    case 'PROGRESS':
+      log(msg.payload.message, msg.payload.level);
+      break;
+
+    case 'SYNC_COMPLETE':
+      syncing = false;
+      document.getElementById('sync-btn').disabled = false;
+      document.getElementById('sync-btn').textContent = 'Sync & Build';
+      document.getElementById('export-btn').disabled = false;
+      break;
+
+    case 'PRINT_FRAMES_STATUS':
+      if (msg.payload.exists) {
+        document.getElementById('export-btn').disabled = false;
+      }
+      break;
+
+    case 'EXPORT_PDF_GROUP':
+      pendingPdfs.push({ filename: msg.payload.filename, pages: msg.payload.pages, pageWidth: msg.payload.pageWidth, pageHeight: msg.payload.pageHeight });
+      break;
+
+    case 'EXPORT_COMPLETE':
+      buildAndDownloadAllPdfs();
+      break;
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Panels
+// ---------------------------------------------------------------------------
+function showPanel(name) {
+  document.getElementById('settings-panel').classList.toggle('active', name === 'settings');
+  document.getElementById('run-panel').classList.toggle('active', name === 'run');
+
+  if (name === 'settings') {
+    postMsg('GET_COMPONENTS');
+  }
+  if (name === 'run') {
+    renderRunSummary();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Settings UI
+// ---------------------------------------------------------------------------
+function applySettingsToUI() {
+  document.getElementById('sheet-url').value = settings.sheetUrl || '';
+  document.getElementById('api-key').value = settings.apiKey || '';
+  renderCardTypes();
+}
+
+function readSettingsFromUI() {
+  settings.sheetUrl = document.getElementById('sheet-url').value.trim();
+  settings.apiKey = document.getElementById('api-key').value.trim();
+  readCardTypesFromUI();
+}
+
+function renderCardTypes() {
+  var container = document.getElementById('card-types-list');
+  container.innerHTML = '';
+  settings.cardTypes.forEach(function(ct, i) {
+    container.appendChild(createCardTypeRow(ct, i));
+  });
+}
+
+function createCardTypeRow(ct, index) {
+  var row = document.createElement('div');
+  row.className = 'card-type-row';
+  row.dataset.index = index;
+
+  row.innerHTML =
+    '<div class="card-type-header">' +
+      '<div class="toggle-row">' +
+        '<label class="toggle-switch">' +
+          '<input type="checkbox" class="ct-enabled" ' + (ct.enabled ? 'checked' : '') + ' />' +
+          '<span class="toggle-slider"></span>' +
+        '</label>' +
+        '<span class="tab-name">' + (ct.tabName || '(unnamed)') + '</span>' +
+      '</div>' +
+      '<button class="remove-btn" title="Remove">&times;</button>' +
+    '</div>' +
+    '<label>Tab Name</label>' +
+    '<input type="text" class="ct-tab-name" value="' + (ct.tabName || '') + '" placeholder="Exact sheet tab name" />' +
+    '<label>Front Component</label>' +
+    '<select class="ct-front-comp">' +
+      '<option value="">-- Select component --</option>' +
+    '</select>' +
+    '<div class="size-readout ct-front-size"></div>' +
+    '<label>Back Component</label>' +
+    '<select class="ct-back-comp">' +
+      '<option value="">-- Select component --</option>' +
+    '</select>' +
+    '<div class="size-readout ct-back-size"></div>';
+
+  // Populate selects
+  var frontSelect = row.querySelector('.ct-front-comp');
+  var backSelect = row.querySelector('.ct-back-comp');
+  populateSelect(frontSelect, ct.frontComponentKey);
+  populateSelect(backSelect, ct.backComponentKey);
+
+  // Request sizes for currently selected components
+  if (ct.frontComponentKey) postMsg('GET_COMPONENT_SIZE', { key: ct.frontComponentKey });
+  if (ct.backComponentKey) postMsg('GET_COMPONENT_SIZE', { key: ct.backComponentKey });
+
+  // Events
+  row.querySelector('.remove-btn').onclick = function() {
+    settings.cardTypes.splice(index, 1);
+    renderCardTypes();
+  };
+
+  frontSelect.onchange = function() {
+    if (frontSelect.value) postMsg('GET_COMPONENT_SIZE', { key: frontSelect.value });
+    else row.querySelector('.ct-front-size').textContent = '';
+  };
+  backSelect.onchange = function() {
+    if (backSelect.value) postMsg('GET_COMPONENT_SIZE', { key: backSelect.value });
+    else row.querySelector('.ct-back-size').textContent = '';
+  };
+
+  var tabInput = row.querySelector('.ct-tab-name');
+  tabInput.oninput = function() {
+    row.querySelector('.tab-name').textContent = tabInput.value || '(unnamed)';
+  };
+
+  return row;
+}
+
+function populateSelect(select, selectedKey) {
+  select.innerHTML = '<option value="">-- Select component --</option>';
+  for (var i = 0; i < components.length; i++) {
+    var comp = components[i];
+    var opt = document.createElement('option');
+    opt.value = comp.key;
+    opt.textContent = comp.name;
+    if (comp.key === selectedKey) opt.selected = true;
+    select.appendChild(opt);
+  }
+}
+
+function rebuildCardTypeSelects() {
+  var rows = document.querySelectorAll('.card-type-row');
+  rows.forEach(function(row, i) {
+    var ct = settings.cardTypes[i];
+    if (!ct) return;
+    populateSelect(row.querySelector('.ct-front-comp'), ct.frontComponentKey);
+    populateSelect(row.querySelector('.ct-back-comp'), ct.backComponentKey);
+  });
+}
+
+function updateSizeReadout(key, width, height) {
+  var rows = document.querySelectorAll('.card-type-row');
+  rows.forEach(function(row) {
+    var frontSelect = row.querySelector('.ct-front-comp');
+    var backSelect = row.querySelector('.ct-back-comp');
+    if (frontSelect.value === key) {
+      row.querySelector('.ct-front-size').textContent = 'Detected: ' + Math.round(width) + ' x ' + Math.round(height) + ' px';
+    }
+    if (backSelect.value === key) {
+      row.querySelector('.ct-back-size').textContent = 'Detected: ' + Math.round(width) + ' x ' + Math.round(height) + ' px';
+    }
+  });
+}
+
+function readCardTypesFromUI() {
+  var rows = document.querySelectorAll('.card-type-row');
+  settings.cardTypes = [];
+  rows.forEach(function(row) {
+    settings.cardTypes.push({
+      tabName: row.querySelector('.ct-tab-name').value.trim(),
+      enabled: row.querySelector('.ct-enabled').checked,
+      frontComponentKey: row.querySelector('.ct-front-comp').value,
+      backComponentKey: row.querySelector('.ct-back-comp').value,
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Run Panel
+// ---------------------------------------------------------------------------
+function renderRunSummary() {
+  var container = document.getElementById('run-summary');
+  container.innerHTML = '';
+
+  var enabled = settings.cardTypes.filter(function(ct) { return ct.enabled; });
+  if (enabled.length === 0) {
+    container.innerHTML = '<div style="color:#999; padding: 8px 0;">No card types enabled. Open Settings to configure.</div>';
+    return;
+  }
+
+  for (var i = 0; i < enabled.length; i++) {
+    var ct = enabled[i];
+    var item = document.createElement('div');
+    item.className = 'summary-item';
+    item.innerHTML = '<span>' + ct.tabName + '</span><span style="color:#888;">Ready</span>';
+    container.appendChild(item);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sync — fetches data via Google gviz CSV endpoint (no API key needed)
+// ---------------------------------------------------------------------------
+async function runSync() {
+  if (syncing) return;
+
+  var enabled = settings.cardTypes.filter(function(ct) { return ct.enabled; });
+  if (enabled.length === 0) {
+    log('No card types enabled.', 'error');
+    return;
+  }
+
+  var spreadsheetId = extractSpreadsheetId(settings.sheetUrl);
+  if (!spreadsheetId) {
+    log('Invalid Google Sheets URL. Check Settings.', 'error');
+    return;
+  }
+
+  if (!settings.apiKey) {
+    log('API Key missing. Check Settings.', 'error');
+    return;
+  }
+
+  syncing = true;
+  document.getElementById('sync-btn').disabled = true;
+  document.getElementById('sync-btn').textContent = 'Syncing...';
+  clearLog();
+
+  log('Fetching sheet data...');
+
+  var sheetData = {};
+
+  for (var t = 0; t < enabled.length; t++) {
+    var ct = enabled[t];
+    try {
+      log('Fetching tab "' + ct.tabName + '"...');
+      var url = 'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId +
+                '/values/' + encodeURIComponent(ct.tabName) + '?key=' + settings.apiKey;
+      var resp = await fetch(url);
+      if (!resp.ok) {
+        var errData = await resp.json().catch(function() { return {}; });
+        var errMsg = (errData.error && errData.error.message) || ('HTTP ' + resp.status);
+        throw new Error(errMsg);
+      }
+      var data = await resp.json();
+      var rows = data.values || [];
+
+      if (rows.length < 2) {
+        log('Tab "' + ct.tabName + '" has no data rows, skipping.', 'warn');
+        continue;
+      }
+
+      var headers = rows[0].map(function(h) { return h.trim(); });
+      var nameIndex = -1;
+      for (var h = 0; h < headers.length; h++) {
+        if (headers[h].toLowerCase() === 'name') { nameIndex = h; break; }
+      }
+
+      if (nameIndex === -1) {
+        log('Tab "' + ct.tabName + '" has no "name" column, skipping.', 'error');
+        continue;
+      }
+
+      var cardRows = [];
+      var skippedCount = 0;
+      var nameCounts = {};
+      for (var i = 1; i < rows.length; i++) {
+        var row = rows[i];
+        var cardName = (row[nameIndex] || '').trim();
+        if (!cardName) {
+          skippedCount++;
+          continue;
+        }
+
+        // De-duplicate names by appending (2), (3), etc.
+        var baseName = cardName;
+        if (!nameCounts[baseName]) {
+          nameCounts[baseName] = 1;
+        } else {
+          nameCounts[baseName]++;
+          cardName = baseName + ' (' + nameCounts[baseName] + ')';
+        }
+
+        var obj = { name: cardName, _displayName: baseName };
+        for (var j = 0; j < headers.length; j++) {
+          // Don't overwrite our deduplicated name with the raw sheet value
+          if (headers[j].toLowerCase() === 'name') continue;
+          obj[headers[j]] = (row[j] || '').trim();
+        }
+        cardRows.push(obj);
+      }
+      if (skippedCount > 0) {
+        log('Skipped ' + skippedCount + ' rows with no name in "' + ct.tabName + '".', 'warn');
+      }
+
+      sheetData[ct.tabName] = cardRows;
+      log('Fetched ' + cardRows.length + ' cards from "' + ct.tabName + '".');
+    } catch (err) {
+      log('Error fetching "' + ct.tabName + '": ' + err.message, 'error');
+    }
+  }
+
+  log('Sending data to Figma for sync...');
+  postMsg('RUN_SYNC', { cardTypes: enabled, sheetData: sheetData });
+}
+
+// ---------------------------------------------------------------------------
+// Progress Log
+// ---------------------------------------------------------------------------
+function log(message, level) {
+  level = level || 'info';
+  var logEl = document.getElementById('progress-log');
+  var line = document.createElement('div');
+  line.className = 'log-' + level;
+  line.textContent = message;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('progress-log').innerHTML = '';
+}
+
+function triggerDownload(blob, filename) {
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+}
+
+/**
+ * Build all collected PDFs and bundle into a single ZIP for one download.
+ */
+async function buildAndDownloadAllPdfs() {
+  var items = pendingPdfs.slice();
+  pendingPdfs = [];
+
+  if (items.length === 0) {
+    document.getElementById('export-btn').disabled = false;
+    document.getElementById('export-btn').textContent = 'Export Print PDFs';
+    return;
+  }
+
+  var files = [];
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    var pngs = [];
+    for (var j = 0; j < item.pages.length; j++) {
+      pngs.push(new Uint8Array(item.pages[j]));
+    }
+    log('Building ' + item.filename + ' (' + pngs.length + ' pages)...');
+    var pdf = await buildPdfFromPngsAsync(pngs, item.pageWidth, item.pageHeight);
+    files.push({ name: item.filename, data: new Uint8Array(pdf) });
+    log('Built ' + item.filename);
+  }
+
+  log('Packaging ' + files.length + ' PDFs into ZIP...');
+  var zipBytes = buildZip(files);
+  var blob = new Blob([zipBytes], { type: 'application/zip' });
+  triggerDownload(blob, 'print-pdfs.zip');
+  log('Downloaded print-pdfs.zip (' + files.length + ' PDFs)');
+
+  document.getElementById('export-btn').disabled = false;
+  document.getElementById('export-btn').textContent = 'Export Print PDFs';
+}
+
+/**
+ * Minimal ZIP builder (store-only, no compression).
+ * files: [{name: string, data: Uint8Array}]
+ */
+function buildZip(files) {
+  var localHeaders = [];
+  var centralHeaders = [];
+  var offset = 0;
+
+  for (var i = 0; i < files.length; i++) {
+    var name = files[i].name;
+    var data = files[i].data;
+    var nameBytes = new TextEncoder().encode(name);
+    var crc = crc32(data);
+
+    // Local file header (30 + nameLen + dataLen)
+    var local = new Uint8Array(30 + nameBytes.length + data.length);
+    var lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true);   // signature
+    lv.setUint16(4, 20, true);            // version needed
+    lv.setUint16(6, 0, true);             // flags
+    lv.setUint16(8, 0, true);             // compression: store
+    lv.setUint16(10, 0, true);            // mod time
+    lv.setUint16(12, 0, true);            // mod date
+    lv.setUint32(14, crc, true);          // crc32
+    lv.setUint32(18, data.length, true);  // compressed size
+    lv.setUint32(22, data.length, true);  // uncompressed size
+    lv.setUint16(26, nameBytes.length, true); // name length
+    lv.setUint16(28, 0, true);            // extra length
+    local.set(nameBytes, 30);
+    local.set(data, 30 + nameBytes.length);
+    localHeaders.push(local);
+
+    // Central directory header (46 + nameLen)
+    var central = new Uint8Array(46 + nameBytes.length);
+    var cv = new DataView(central.buffer);
+    cv.setUint32(0, 0x02014b50, true);    // signature
+    cv.setUint16(4, 20, true);            // version made by
+    cv.setUint16(6, 20, true);            // version needed
+    cv.setUint16(8, 0, true);             // flags
+    cv.setUint16(10, 0, true);            // compression: store
+    cv.setUint16(12, 0, true);            // mod time
+    cv.setUint16(14, 0, true);            // mod date
+    cv.setUint32(16, crc, true);          // crc32
+    cv.setUint32(20, data.length, true);  // compressed size
+    cv.setUint32(24, data.length, true);  // uncompressed size
+    cv.setUint16(28, nameBytes.length, true); // name length
+    cv.setUint16(30, 0, true);            // extra length
+    cv.setUint16(32, 0, true);            // comment length
+    cv.setUint16(34, 0, true);            // disk number
+    cv.setUint16(36, 0, true);            // internal attrs
+    cv.setUint32(38, 0, true);            // external attrs
+    cv.setUint32(42, offset, true);       // local header offset
+    central.set(nameBytes, 46);
+    centralHeaders.push(central);
+
+    offset += local.length;
+  }
+
+  var centralSize = 0;
+  for (var i = 0; i < centralHeaders.length; i++) centralSize += centralHeaders[i].length;
+
+  // End of central directory (22 bytes)
+  var eocd = new Uint8Array(22);
+  var ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);         // signature
+  ev.setUint16(4, 0, true);                   // disk number
+  ev.setUint16(6, 0, true);                   // central dir disk
+  ev.setUint16(8, files.length, true);         // entries on disk
+  ev.setUint16(10, files.length, true);        // total entries
+  ev.setUint32(12, centralSize, true);         // central dir size
+  ev.setUint32(16, offset, true);              // central dir offset
+  ev.setUint16(20, 0, true);                  // comment length
+
+  var totalSize = offset + centralSize + 22;
+  var result = new Uint8Array(totalSize);
+  var pos = 0;
+  for (var i = 0; i < localHeaders.length; i++) {
+    result.set(localHeaders[i], pos);
+    pos += localHeaders[i].length;
+  }
+  for (var i = 0; i < centralHeaders.length; i++) {
+    result.set(centralHeaders[i], pos);
+    pos += centralHeaders[i].length;
+  }
+  result.set(eocd, pos);
+  return result;
+}
+
+/** CRC-32 (ISO 3309) */
+var crc32Table = null;
+function crc32(data) {
+  if (!crc32Table) {
+    crc32Table = new Uint32Array(256);
+    for (var n = 0; n < 256; n++) {
+      var c = n;
+      for (var k = 0; k < 8; k++) {
+        c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      }
+      crc32Table[n] = c;
+    }
+  }
+  var crc = 0xFFFFFFFF;
+  for (var i = 0; i < data.length; i++) {
+    crc = crc32Table[(crc ^ data[i]) & 0xFF] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+/**
+ * Minimal PDF builder that creates a multi-page document with one PNG per page.
+ * PNGs are embedded directly (PDF supports PNG-compressed images via FlateDecode
+ * with PNG prediction, but it's simpler to embed as raw image XObjects).
+ *
+ * We embed the raw PNG as an SMask-less Image XObject using the DCT or
+ * Flate stream. Actually, PDF doesn't natively support PNG embedding —
+ * but we can use the trick of embedding PNGs as-is inside an Image XObject
+ * with /Filter /FlateDecode and extracting the IDAT chunks.
+ *
+ * SIMPLEST APPROACH: embed entire PNG files as-is using an inline image hack?
+ * No — let's just draw each PNG using an <canvas> to get raw RGBA, then embed
+ * the RGB stream with FlateDecode.
+ */
+// Decodes PNGs via Image+Canvas, then builds a multi-page PDF
+async function buildPdfFromPngsAsync(pngs, pageW, pageH) {
+  // Decode each PNG to raw RGB pixels using canvas
+  var pages = [];
+  for (var i = 0; i < pngs.length; i++) {
+    var imgData = await decodePngToRgb(pngs[i]);
+    pages.push(imgData);
+  }
+
+  return assemblePdf(pages, pageW, pageH);
+}
+
+function decodePngToRgb(pngBytes) {
+  return new Promise(function(resolve, reject) {
+    var blob = new Blob([pngBytes], { type: 'image/png' });
+    var url = URL.createObjectURL(blob);
+    var img = new Image();
+    img.onload = function() {
+      var canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      var ctx = canvas.getContext('2d');
+      // White background (for transparency)
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0);
+      var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      // Extract RGB only (drop alpha)
+      var rgb = new Uint8Array(img.width * img.height * 3);
+      var src = imageData.data;
+      for (var j = 0, k = 0; j < src.length; j += 4, k += 3) {
+        rgb[k] = src[j];
+        rgb[k+1] = src[j+1];
+        rgb[k+2] = src[j+2];
+      }
+      URL.revokeObjectURL(url);
+      resolve({ rgb: rgb, width: img.width, height: img.height });
+    };
+    img.onerror = function() {
+      URL.revokeObjectURL(url);
+      reject(new Error('Failed to decode PNG'));
+    };
+    img.src = url;
+  });
+}
+
+function assemblePdf(pages, pageW, pageH) {
+  // Build a minimal multi-page PDF with embedded RGB images
+  // pageW/pageH are in PDF points (72 DPI)
+
+  var objs = []; // array of {id, data} — data is a string or Uint8Array
+  var nextId = 1;
+
+  function obj(id) { return id + ' 0 obj\n'; }
+  function endobj() { return '\nendobj\n'; }
+
+  // Object 1: Catalog
+  var catalogId = nextId++;
+  var pagesId = nextId++;
+
+  // Pre-allocate IDs for each page and its image
+  var pageIds = [];
+  var imgIds = [];
+  for (var i = 0; i < pages.length; i++) {
+    pageIds.push(nextId++);
+    imgIds.push(nextId++);
+  }
+
+  // Catalog
+  objs.push({
+    id: catalogId,
+    data: obj(catalogId) + '<< /Type /Catalog /Pages ' + pagesId + ' 0 R >>' + endobj()
+  });
+
+  // Pages
+  var kidRefs = '';
+  for (var i = 0; i < pageIds.length; i++) {
+    kidRefs += pageIds[i] + ' 0 R ';
+  }
+  objs.push({
+    id: pagesId,
+    data: obj(pagesId) + '<< /Type /Pages /Kids [' + kidRefs + '] /Count ' + pages.length + ' >>' + endobj()
+  });
+
+  // For each page: a Page object and an Image XObject
+  for (var i = 0; i < pages.length; i++) {
+    var pg = pages[i];
+    var imgW = pg.width;
+    var imgH = pg.height;
+    var rgbData = pg.rgb;
+
+    // Content stream: draw image scaled to fill the page
+    var contentStr = 'q ' + pageW + ' 0 0 ' + pageH + ' 0 0 cm /Img' + i + ' Do Q';
+    var contentId = nextId++;
+
+    // Image XObject (uncompressed RGB stream)
+    var imgObjStr = obj(imgIds[i]) +
+      '<< /Type /XObject /Subtype /Image /Width ' + imgW + ' /Height ' + imgH +
+      ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length ' + rgbData.length + ' >>\n' +
+      'stream\n';
+    var imgObjEnd = '\nendstream' + endobj();
+
+    objs.push({
+      id: imgIds[i],
+      data: imgObjStr,
+      streamData: rgbData,
+      streamEnd: imgObjEnd
+    });
+
+    // Content stream
+    objs.push({
+      id: contentId,
+      data: obj(contentId) + '<< /Length ' + contentStr.length + ' >>\nstream\n' + contentStr + '\nendstream' + endobj()
+    });
+
+    // Page object
+    objs.push({
+      id: pageIds[i],
+      data: obj(pageIds[i]) +
+        '<< /Type /Page /Parent ' + pagesId + ' 0 R' +
+        ' /MediaBox [0 0 ' + pageW + ' ' + pageH + ']' +
+        ' /Contents ' + contentId + ' 0 R' +
+        ' /Resources << /XObject << /Img' + i + ' ' + imgIds[i] + ' 0 R >> >> >>' +
+        endobj()
+    });
+  }
+
+  // Now assemble the final PDF bytes
+  var parts = [];
+  var offsets = {};
+  var pos = 0;
+
+  function addStr(s) {
+    var encoded = new TextEncoder().encode(s);
+    parts.push(encoded);
+    pos += encoded.length;
+  }
+
+  // Header
+  addStr('%PDF-1.4\n%\xC0\xC1\xC2\xC3\n');
+
+  // Sort objects by ID
+  objs.sort(function(a, b) { return a.id - b.id; });
+
+  for (var i = 0; i < objs.length; i++) {
+    var o = objs[i];
+    offsets[o.id] = pos;
+    addStr(o.data);
+    if (o.streamData) {
+      parts.push(o.streamData);
+      pos += o.streamData.length;
+      addStr(o.streamEnd);
+    }
+  }
+
+  // Cross-reference table
+  var xrefOffset = pos;
+  var maxId = nextId;
+  addStr('xref\n0 ' + maxId + '\n');
+  addStr('0000000000 65535 f \n');
+  for (var id = 1; id < maxId; id++) {
+    if (offsets[id] !== undefined) {
+      var offsetStr = String(offsets[id]);
+      while (offsetStr.length < 10) offsetStr = '0' + offsetStr;
+      addStr(offsetStr + ' 00000 n \n');
+    } else {
+      addStr('0000000000 00000 f \n');
+    }
+  }
+
+  // Trailer
+  addStr('trailer\n<< /Size ' + maxId + ' /Root ' + catalogId + ' 0 R >>\nstartxref\n' + xrefOffset + '\n%%EOF\n');
+
+  // Combine all parts
+  var totalLen = 0;
+  for (var i = 0; i < parts.length; i++) totalLen += parts[i].length;
+  var result = new Uint8Array(totalLen);
+  var idx = 0;
+  for (var i = 0; i < parts.length; i++) {
+    result.set(parts[i], idx);
+    idx += parts[i].length;
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Event Listeners
+// ---------------------------------------------------------------------------
+document.getElementById('add-card-type-btn').onclick = function() {
+  readCardTypesFromUI();
+  settings.cardTypes.push({
+    tabName: '',
+    enabled: true,
+    frontComponentKey: '',
+    backComponentKey: '',
+  });
+  renderCardTypes();
+};
+
+document.getElementById('save-settings-btn').onclick = function() {
+  readSettingsFromUI();
+  postMsg('SAVE_SETTINGS', settings);
+};
+
+document.getElementById('back-to-run-btn').onclick = function() {
+  readSettingsFromUI();
+  showPanel('run');
+};
+
+document.getElementById('open-settings-btn').onclick = function() {
+  showPanel('settings');
+};
+
+document.getElementById('sync-btn').onclick = runSync;
+
+document.getElementById('export-btn').onclick = function() {
+  document.getElementById('export-btn').disabled = true;
+  document.getElementById('export-btn').textContent = 'Exporting...';
+  pendingPdfs = [];
+  postMsg('EXPORT_PRINTS');
+};
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+postMsg('GET_SETTINGS');
+postMsg('CHECK_PRINT_FRAMES');
+</script>
+
+</body>
+</html>
