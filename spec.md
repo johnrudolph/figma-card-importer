@@ -156,14 +156,19 @@ Print frames are named:
 Cards are placed in alphabetical order, left-to-right, top-to-bottom across as many sheets as needed.
 
 #### Back print sheets — CRITICAL ORDERING
-Back print sheets must be ordered in **reverse** relative to front print sheets.
+Back print sheets must be ordered in the **SAME order** as front print sheets (NOT reversed).
 
-**Explanation:** When front sheets print, they stack in the output tray in reverse order (last sheet printed is on top). When the user flips the stack to reload for back printing, the printer feeds the sheet that was last to print first. Therefore:
+**Explanation:** There are TWO reversals that cancel out:
+1. **Printer reversal**: The printer prints pages last-to-first (so page 6 prints first, then 5, 4, 3, 2, 1), causing sheets to stack in reverse order in the output tray (page 1 on top).
+2. **Physical flip reversal**: When you flip the stack to reload it for back printing, the physical order reverses (page 6 now on top, fed into printer first).
 
-- If fronts printed as sheets 1, 2, 3 (sheet 3 on top of stack after flip)
-- Backs must print as sheets 3, 2, 1 (to match correctly)
+These two reversals cancel each other out, so:
+- If fronts print as PDF pages 1, 2, 3, 4, 5, 6 → they stack as [1 on top, 2, 3, 4, 5, 6 on bottom]
+- After flipping → [6 on top, 5, 4, 3, 2, 1 on bottom]
+- Backs should print as PDF pages 1, 2, 3, 4, 5, 6 → page 6 back prints first (on front page 6), then 5, 4, 3, 2, 1
+- Result: All pages align correctly
 
-Implementation: after building back print sheet frames in order, reverse the order of the frames OR name them in reverse. The simplest approach: build back sheets in the same card order, but then reverse the list of frames so that when the user exports and prints them in file order, they come out correct.
+**Implementation**: Build back sheet frames with the same numbering as fronts (01, 02, 03...) and export in that order. Do NOT reverse.
 
 Include a comment in the code explaining this logic clearly.
 

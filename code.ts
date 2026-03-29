@@ -680,6 +680,13 @@ async function exportPrintFrames() {
 
   for (const groupKey of groupKeys) {
     const frames = groups[groupKey];
+
+    // CRITICAL: Backs must be in the SAME page order as fronts (01, 02, 03...),
+    // NOT reversed, because the printer prints last-to-first AND you flip the
+    // physical stack when reloading (two reversals cancel out).
+    // Sort within each group to ensure correct order:
+    frames.sort((a, b) => a.name.localeCompare(b.name));
+
     sendProgress(`Exporting ${groupKey}.pdf (${frames.length} pages)...`);
 
     const pngPages: number[][] = [];
