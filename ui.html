@@ -166,7 +166,10 @@
   <div class="hint">Sheet must be shared as "Anyone with the link can view"</div>
 
   <label for="api-key">Google Sheets API Key</label>
-  <input type="password" id="api-key" placeholder="Enter API key" />
+  <div style="display:flex; gap:4px; margin-bottom:8px;">
+    <input type="text" id="api-key" placeholder="Enter API key" style="margin-bottom:0; flex:1;" />
+    <button class="btn-secondary btn-small" id="copy-api-key-btn" title="Copy API key" style="white-space:nowrap;">Copy</button>
+  </div>
   <div class="hint">Free — Google Cloud Console → Sheets API → Create Key</div>
 
   <h3>Card Types</h3>
@@ -1022,6 +1025,17 @@ document.getElementById('add-card-type-btn').onclick = function() {
     backComponentKey: '',
   });
   renderCardTypes();
+};
+
+document.getElementById('copy-api-key-btn').onclick = function() {
+  var key = document.getElementById('api-key').value;
+  if (key) {
+    navigator.clipboard.writeText(key).then(function() {
+      var btn = document.getElementById('copy-api-key-btn');
+      btn.textContent = 'Copied!';
+      setTimeout(function() { btn.textContent = 'Copy'; }, 1500);
+    });
+  }
 };
 
 document.getElementById('save-settings-btn').onclick = function() {
