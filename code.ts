@@ -465,6 +465,8 @@ async function runSync(payload: RunSyncPayload) {
             }
             const matchingKey = Object.keys(row).find((k) => k.toLowerCase() === fieldName);
             if (matchingKey && row[matchingKey] && tn.characters !== row[matchingKey]) {
+              const lowered = row[matchingKey].toLowerCase();
+              if (lowered === 'show' || lowered === 'hide') continue;
               sendProgress(
                 `VERIFY FAIL: "${row.name}" field "${fieldName}" expected="${row[matchingKey]}" got="${tn.characters}"`,
                 'error'
