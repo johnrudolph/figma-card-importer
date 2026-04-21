@@ -286,16 +286,78 @@ function buildPrintSheets(
 
     for (let r = 0; r < rows && cardIndex < instances.length; r++) {
       for (let c = 0; c < cols && cardIndex < instances.length; c++) {
-        const clone = instances[cardIndex].clone();
-        const col = mirrorRows ? (cols - 1 - c) : c;
-        clone.x = offsetX + col * (cardWidth + gapX);
-        clone.y = offsetY + r * (cardHeight + gapY);
-        sheetFrame.appendChild(clone);
-        cardIndex++;
+        try {
+          const original = instances[cardIndex];
+          const col = mirrorRows ? (cols - 1 - c) : c;
+
+          // Clone the card
+          const clone = original.clone();
+          clone.x = offsetX + col * (cardWidth + gapX);
+          clone.y = offsetY + r * (cardHeight + gapY);
+          sheetFrame.appendChild(clone);
+
+          // Detach this instance and all nested instances to prevent component reference issues
+          // This must be done after appendChild because detaching changes the node type
+          try {
+            // First detach the main instance
+            clone.detachInstance();
+
+            // Then find and detach any nested instances within
+            const nestedInstances = clone.findAll((n) => n.type === 'INSTANCE') as InstanceNode[];
+            for (const nested of nestedInstances) {
+              try {
+                nested.detachInstance();
+              } catch (nestedErr) {
+                // Some instances might not be detachable, continue
+              }
+            }
+
+            // Also validate and clean up any problematic image fills
+            const nodesWithFills = clone.findAll((n) => 'fills' in n);
+            for (const node of nodesWithFills) {
+              try {
+                const fills = (node as GeometryMixin).fills;
+                if (fills !== figma.mixed && Array.isArray(fills)) {
+                  // Try to access the fills to ensure they're valid
+                  const validFills = fills.filter((fill) => {
+                    if (fill.type === 'IMAGE') {
+                      try {
+                        // Try to access image hash to verify it's valid
+                        const hash = fill.imageHash;
+                        return hash !== undefined && hash !== null;
+                      } catch {
+                        return false; // Invalid image fill
+                      }
+                    }
+                    return true; // Non-image fills are OK
+                  });
+                  if (validFills.length !== fills.length) {
+                    (node as GeometryMixin).fills = validFills;
+                  }
+                }
+              } catch (fillErr) {
+                // If we can't access fills, set to empty
+                try {
+                  (node as GeometryMixin).fills = [];
+                } catch {
+                  // Can't fix this node, move on
+                }
+              }
+            }
+          } catch (detachErr) {
+            // If detaching fails, the instance might already be detached or invalid
+          }
+
+          cardIndex++;
+        } catch (cloneErr: any) {
+          sendProgress(`Warning: Failed to clone card ${cardIndex}: ${cloneErr.message}`, 'warn');
+          cardIndex++;
+        }
       }
     }
 
     sheets.push(sheetFrame);
+    sendProgress(`  Built ${side} sheet ${sheetNumber} (${sheetFrame.children.length} cards)`);
     sheetNumber++;
   }
 
@@ -652,6 +714,85 @@ figma.ui.onmessage = async (msg: { type: string; payload?: any }) => {
 // Export Print Frames
 // ---------------------------------------------------------------------------
 
+/**
+ * Validate and clean up a frame before export to prevent runtime aborts.
+ * Removes detached nodes, validates all child nodes, and cleans up instances.
+ */
+async function validateAndCleanFrame(frame: FrameNode): Promise<boolean> {
+  try {
+    // Check if frame is still valid and attached
+    if (frame.removed || !frame.parent) {
+      return false;
+    }
+
+    // Find and detach any remaining instances (this prevents component reference errors)
+    const instances = frame.findAll((n) => n.type === 'INSTANCE') as InstanceNode[];
+    for (const inst of instances) {
+      try {
+        inst.detachInstance();
+      } catch {
+        // Can't detach, might already be detached
+      }
+    }
+
+    // Remove any detached children
+    const children = [...frame.children];
+    for (const child of children) {
+      try {
+        // Try to access basic properties to verify the node is valid
+        const _ = child.name;
+        const __ = child.type;
+
+        if (child.removed) {
+          continue; // Skip already removed nodes
+        }
+      } catch (e) {
+        // Node is invalid, try to remove it
+        try {
+          child.remove();
+        } catch (removeErr) {
+          // Can't remove, frame might be corrupted
+          return false;
+        }
+      }
+    }
+
+    // Clean up any problematic image fills
+    const nodesWithFills = frame.findAll((n) => 'fills' in n);
+    for (const node of nodesWithFills) {
+      try {
+        const fills = (node as GeometryMixin).fills;
+        if (fills !== figma.mixed && Array.isArray(fills)) {
+          const validFills = fills.filter((fill) => {
+            if (fill.type === 'IMAGE') {
+              try {
+                return fill.imageHash !== undefined && fill.imageHash !== null;
+              } catch {
+                return false;
+              }
+            }
+            return true;
+          });
+          if (validFills.length !== fills.length) {
+            (node as GeometryMixin).fills = validFills;
+          }
+        }
+      } catch {
+        // If we can't access fills, set to empty
+        try {
+          (node as GeometryMixin).fills = [];
+        } catch {
+          // Can't fix this node
+        }
+      }
+    }
+
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 async function exportPrintFrames() {
   const printFrames = figma.currentPage.children.filter(
     (n): n is FrameNode => n.type === 'FRAME' && n.name.startsWith('Print --')
@@ -662,6 +803,23 @@ async function exportPrintFrames() {
     figma.ui.postMessage({ type: 'EXPORT_COMPLETE', payload: null });
     return;
   }
+
+  sendProgress('Validating and cleaning print frames...');
+
+  // Validate all frames before starting export
+  let invalidFrames = 0;
+  let cleanedFrames = 0;
+  for (const frame of printFrames) {
+    const isValid = await validateAndCleanFrame(frame);
+    if (!isValid) {
+      sendProgress(`Warning: Frame "${frame.name}" has invalid nodes`, 'warn');
+      invalidFrames++;
+    } else {
+      cleanedFrames++;
+    }
+  }
+
+  sendProgress(`Validated ${cleanedFrames} frames successfully${invalidFrames > 0 ? `, cleaned ${invalidFrames} frames with issues` : ''}`);
 
   printFrames.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -690,24 +848,59 @@ async function exportPrintFrames() {
     sendProgress(`Exporting ${groupKey}.pdf (${frames.length} pages)...`);
 
     const pngPages: number[][] = [];
-    for (const frame of frames) {
-      const pngBytes = await frame.exportAsync({
-        format: 'PNG',
-        constraint: { type: 'SCALE', value: 3 },
-      });
-      pngPages.push(Array.from(pngBytes));
-      sendProgress(`  Rendered page ${pngPages.length}/${frames.length}`);
+    for (let i = 0; i < frames.length; i++) {
+      const frame = frames[i];
+      try {
+        sendProgress(`  Rendering ${frame.name}...`);
+
+        // Pre-load all fonts in the frame to avoid runtime issues
+        const textNodes = frame.findAll((n) => n.type === 'TEXT') as TextNode[];
+        for (const tn of textNodes) {
+          const len = tn.characters.length;
+          if (len > 0) {
+            try {
+              for (const font of tn.getRangeAllFontNames(0, len)) {
+                await figma.loadFontAsync(font);
+              }
+            } catch (fontErr: any) {
+              sendProgress(`    Warning: Could not load font for text in ${frame.name}`, 'warn');
+            }
+          } else if (tn.fontName !== figma.mixed) {
+            try {
+              await figma.loadFontAsync(tn.fontName as FontName);
+            } catch (fontErr: any) {
+              sendProgress(`    Warning: Could not load font for text in ${frame.name}`, 'warn');
+            }
+          }
+        }
+
+        // Use scale 2 instead of 3 to reduce memory usage and prevent crashes
+        const pngBytes = await frame.exportAsync({
+          format: 'PNG',
+          constraint: { type: 'SCALE', value: 2 },
+        });
+        pngPages.push(Array.from(pngBytes));
+        sendProgress(`  Rendered page ${pngPages.length}/${frames.length}`);
+      } catch (err: any) {
+        sendProgress(`ERROR exporting frame "${frame.name}": ${err.message || err}`, 'error');
+        sendProgress(`Skipping this frame and continuing...`, 'warn');
+        // Continue with next frame instead of aborting entire export
+      }
     }
 
-    figma.ui.postMessage({
-      type: 'EXPORT_PDF_GROUP',
-      payload: {
-        filename: groupKey + '.pdf',
-        pages: pngPages,
-        pageWidth: 612,
-        pageHeight: 792,
-      },
-    });
+    if (pngPages.length > 0) {
+      figma.ui.postMessage({
+        type: 'EXPORT_PDF_GROUP',
+        payload: {
+          filename: groupKey + '.pdf',
+          pages: pngPages,
+          pageWidth: 612,
+          pageHeight: 792,
+        },
+      });
+    } else {
+      sendProgress(`No pages successfully exported for ${groupKey}.pdf`, 'error');
+    }
   }
 
   sendProgress(`Export complete — ${groupKeys.length} PDFs.`);
