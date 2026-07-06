@@ -1118,6 +1118,14 @@ async function exportTtsDecks() {
     return;
   }
 
+  // Report how many Print frames we can see, split by side, so a stale/partial
+  // canvas (e.g. fronts but no backs) is obvious in the log.
+  const allPrintFrames = figma.currentPage.children.filter(
+    (n): n is FrameNode => n.type === 'FRAME' && n.name.indexOf('Print --') === 0
+  );
+  const backCount = allPrintFrames.filter((f) => f.name.indexOf(' -- Backs -- ') !== -1).length;
+  sendProgress(`Found ${allPrintFrames.length} Print frame(s): ${frontFrames.length} fronts, ${backCount} backs.`);
+
   const tabNames: string[] = [];
   for (const f of frontFrames) {
     const parts = f.name.split(' -- ');
@@ -1129,17 +1137,23 @@ async function exportTtsDecks() {
     'TABLETOP SIMULATOR — DECK IMPORT',
     '=================================',
     '',
+    '  *** CRITICAL: TTS defaults the import to 10 x 7. That is almost never',
+    '  *** right for these sheets. You MUST change Width and Height to the exact',
+    '  *** values shown for each sheet below (also baked into every filename,',
+    '  *** e.g. "..._10x6_" means Width=10, Height=6). If you leave the 10x7',
+    '  *** default, the cards will drift/misalign further down the deck.',
+    '',
     'These are stitched card sheets (faces + matching backs). To import each deck:',
     '',
     '  1. In TTS: Objects > Components > Custom > Deck',
     '  2. Face  = the "-faces-" PNG   Back = the "-backs-" PNG',
     '     (when asked, choose Cloud upload so TTS hosts the image and fills the URL)',
-    '  3. Set Width and Height to the grid values shown below',
+    '  3. Set Width and Height to the EXACT grid values shown below (NOT 10x7)',
     '  4. Set Number of cards to the count shown',
     '  5. Turn ON "Unique Backs" and "Back is Hidden"',
     '  6. Click Import.',
     '',
-    'Sheets hold up to 70 cards (10×7); decks larger than that are split into',
+    'Sheets hold up to 70 cards (10×7max); decks larger than that are split into',
     'multiple numbered sheets — import each as its own deck (or merge in-game).',
     '',
     '---------------------------------',
@@ -1193,15 +1207,18 @@ async function exportTtsDecks() {
       const fs = faceSpecs[s];
       const bs = backSpecs[s];
       const num = String(s + 1).padStart(2, '0');
-      const faceName = `${slug}-faces-${num}.png`;
-      const backName = `${slug}-backs-${num}.png`;
+      // Bake the grid + card count into the filename so the correct import
+      // values (Width x Height, Number) are impossible to miss.
+      const dims = `${fs.cols}x${fs.rows}_${fs.count}cards`;
+      const faceName = `${slug}-faces-${num}_${dims}.png`;
+      const backName = `${slug}-backs-${num}_${dims}.png`;
 
       const okFace = await exportTtsFrame(fs.frame, faceName);
       const okBack = bs ? await exportTtsFrame(bs.frame, backName) : false;
       if (okFace) anySheets = true;
 
       readme.push(`  Sheet ${num}: ${faceName}${okBack ? ` + ${backName}` : ''}`);
-      readme.push(`    Width=${fs.cols}  Height=${fs.rows}  Number=${fs.count}  (Unique Backs ON, Back is Hidden ON)`);
+      readme.push(`    >>> Width=${fs.cols}  Height=${fs.rows}  Number=${fs.count}  (Unique Backs ON, Back is Hidden ON)`);
     }
     readme.push('');
   }
