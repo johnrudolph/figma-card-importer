@@ -204,6 +204,10 @@
       Export Print PDFs
     </button>
 
+    <button class="btn-secondary" id="tts-btn" style="width:100%; margin-top: 6px;" disabled>
+      Export for Tabletop Sim
+    </button>
+
     <div id="progress-log"></div>
   </div>
 </div>
@@ -220,6 +224,8 @@ var settings = {
 var components = []; // [{name, key}]
 var syncing = false;
 var pendingPdfs = []; // collected PDF groups during export
+var pendingTtsFiles = []; // collected sheet PNGs during TTS export
+var ttsReadme = ''; // import instructions text for the TTS ZIP
 
 // ---------------------------------------------------------------------------
 // URL Parsing
@@ -345,20 +351,43 @@ window.onmessage = function(event) {
       document.getElementById('sync-btn').disabled = false;
       document.getElementById('sync-btn').textContent = 'Sync & Build';
       document.getElementById('export-btn').disabled = false;
+      document.getElementById('tts-btn').disabled = false;
       break;
 
     case 'PRINT_FRAMES_STATUS':
       if (msg.payload.exists) {
         document.getElementById('export-btn').disabled = false;
+        document.getElementById('tts-btn').disabled = false;
       }
       break;
 
-    case 'EXPORT_PDF_GROUP':
-      pendingPdfs.push({ filename: msg.payload.filename, pages: msg.payload.pages, pageWidth: msg.payload.pageWidth, pageHeight: msg.payload.pageHeight });
+    case 'EXPORT_PDF_PAGE': {
+      var entry = null;
+      for (var pi = 0; pi < pendingPdfs.length; pi++) {
+        if (pendingPdfs[pi].filename === msg.payload.filename) { entry = pendingPdfs[pi]; break; }
+      }
+      if (!entry) {
+        entry = { filename: msg.payload.filename, pages: [], pageWidth: msg.payload.pageWidth, pageHeight: msg.payload.pageHeight };
+        pendingPdfs.push(entry);
+      }
+      entry.pages.push(msg.payload.bytes);
       break;
+    }
 
     case 'EXPORT_COMPLETE':
       buildAndDownloadAllPdfs();
+      break;
+
+    case 'EXPORT_TTS_SHEET':
+      pendingTtsFiles.push({ name: msg.payload.filename, data: new Uint8Array(msg.payload.bytes) });
+      break;
+
+    case 'EXPORT_TTS_README':
+      ttsReadme = msg.payload.text || '';
+      break;
+
+    case 'EXPORT_TTS_COMPLETE':
+      buildAndDownloadTts();
       break;
   }
 };
@@ -702,6 +731,36 @@ async function buildAndDownloadAllPdfs() {
 
   document.getElementById('export-btn').disabled = false;
   document.getElementById('export-btn').textContent = 'Export Print PDFs';
+}
+
+/**
+ * Bundle the collected TTS sheet PNGs + README into a single ZIP download.
+ */
+function buildAndDownloadTts() {
+  var files = pendingTtsFiles.slice();
+  pendingTtsFiles = [];
+
+  var ttsBtn = document.getElementById('tts-btn');
+
+  if (files.length === 0) {
+    ttsBtn.disabled = false;
+    ttsBtn.textContent = 'Export for Tabletop Sim';
+    return;
+  }
+
+  if (ttsReadme) {
+    files.push({ name: 'TTS-IMPORT-README.txt', data: new TextEncoder().encode(ttsReadme) });
+  }
+
+  log('Packaging ' + files.length + ' TTS file(s) into ZIP...');
+  var zipBytes = buildZip(files);
+  var blob = new Blob([zipBytes], { type: 'application/zip' });
+  triggerDownload(blob, 'tts-decks.zip');
+  log('Downloaded tts-decks.zip');
+
+  ttsReadme = '';
+  ttsBtn.disabled = false;
+  ttsBtn.textContent = 'Export for Tabletop Sim';
 }
 
 /**
@@ -1059,6 +1118,14 @@ document.getElementById('export-btn').onclick = function() {
   document.getElementById('export-btn').textContent = 'Exporting...';
   pendingPdfs = [];
   postMsg('EXPORT_PRINTS');
+};
+
+document.getElementById('tts-btn').onclick = function() {
+  document.getElementById('tts-btn').disabled = true;
+  document.getElementById('tts-btn').textContent = 'Exporting...';
+  pendingTtsFiles = [];
+  ttsReadme = '';
+  postMsg('EXPORT_TTS');
 };
 
 // ---------------------------------------------------------------------------

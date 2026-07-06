@@ -51,6 +51,15 @@ function createFrame(name: string, x: number, y: number): FrameNode {
   return frame;
 }
 
+/** Extract the field name from a Figma layer name (everything after the first `#`,
+ *  with any leading non-word chars like `/` stripped — so both `#title` and
+ *  `#/show_action` yield the column key). */
+function extractFieldName(layerName: string): string {
+  const hash = layerName.indexOf('#');
+  if (hash === -1) return '';
+  return layerName.substring(hash + 1).replace(/^[^a-z0-9_]+/i, '').toLowerCase();
+}
+
 /** Resolve a component by node ID (local) or key (library). */
 async function getComponent(keyOrId: string): Promise<ComponentNode | null> {
   try {
@@ -163,7 +172,8 @@ async function populateInstanceAsync(
   const descendants = instance.findAll((n) => n.name.indexOf('#') !== -1);
 
   for (const node of descendants) {
-    const fieldName = node.name.substring(node.name.indexOf('#') + 1).toLowerCase();
+    const fieldName = extractFieldName(node.name);
+    if (!fieldName) continue;
 
     // Art field — fill from art_bank by card display name
     if (fieldName === 'art') {
@@ -513,7 +523,8 @@ async function runSync(payload: RunSyncPayload) {
         const textNodes = fi.findAll((n) => n.type === 'TEXT') as TextNode[];
         for (const tn of textNodes) {
           if (tn.name.indexOf('#') !== -1) {
-            const fieldName = tn.name.substring(tn.name.indexOf('#') + 1).toLowerCase();
+            const fieldName = extractFieldName(tn.name);
+            if (!fieldName) continue;
             // Name field uses display name
             if (fieldName === 'name') {
               if (tn.characters !== row._displayName) {
@@ -652,8 +663,36 @@ figma.showUI(__html__, { width: 360, height: 520 });
 figma.ui.onmessage = async (msg: { type: string; payload?: any }) => {
   switch (msg.type) {
     case 'GET_SETTINGS': {
-      const settings = await figma.clientStorage.getAsync('cardSyncSettings');
-      figma.ui.postMessage({ type: 'SETTINGS', payload: settings || null });
+      // apiKey is per-user (clientStorage); sheetUrl + cardTypes are per-file
+      // (document plugin data) so configs don't bleed between Figma files.
+      let apiKey: string = (await figma.clientStorage.getAsync('cardSyncApiKey')) || '';
+
+      // One-time migration: legacy clientStorage blob held everything together.
+      if (!apiKey) {
+        const legacy = await figma.clientStorage.getAsync('cardSyncSettings');
+        if (legacy && legacy.apiKey) {
+          apiKey = legacy.apiKey;
+          await figma.clientStorage.setAsync('cardSyncApiKey', apiKey);
+        }
+      }
+
+      const raw = figma.root.getPluginData('cardSyncSettings');
+      let sheetUrl = '';
+      let cardTypes: CardTypeConfig[] = [];
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          sheetUrl = parsed.sheetUrl || '';
+          cardTypes = parsed.cardTypes || [];
+        } catch (_) {
+          // ignore corrupt data — treat as empty
+        }
+      }
+
+      figma.ui.postMessage({
+        type: 'SETTINGS',
+        payload: { apiKey, sheetUrl, cardTypes },
+      });
       break;
     }
 
@@ -666,7 +705,12 @@ figma.ui.onmessage = async (msg: { type: string; payload?: any }) => {
     }
 
     case 'SAVE_SETTINGS': {
-      await figma.clientStorage.setAsync('cardSyncSettings', msg.payload);
+      const { apiKey, sheetUrl, cardTypes } = msg.payload || {};
+      await figma.clientStorage.setAsync('cardSyncApiKey', apiKey || '');
+      figma.root.setPluginData(
+        'cardSyncSettings',
+        JSON.stringify({ sheetUrl: sheetUrl || '', cardTypes: cardTypes || [] })
+      );
       figma.ui.postMessage({ type: 'SETTINGS_SAVED', payload: null });
       break;
     }
@@ -704,6 +748,16 @@ figma.ui.onmessage = async (msg: { type: string; payload?: any }) => {
       } catch (err: any) {
         sendProgress(`Export error: ${err.message || err}`, 'error');
         figma.ui.postMessage({ type: 'EXPORT_COMPLETE', payload: null });
+      }
+      break;
+    }
+
+    case 'EXPORT_TTS': {
+      try {
+        await exportTtsDecks();
+      } catch (err: any) {
+        sendProgress(`TTS export error: ${err.message || err}`, 'error');
+        figma.ui.postMessage({ type: 'EXPORT_TTS_COMPLETE', payload: null });
       }
       break;
     }
@@ -847,7 +901,7 @@ async function exportPrintFrames() {
 
     sendProgress(`Exporting ${groupKey}.pdf (${frames.length} pages)...`);
 
-    const pngPages: number[][] = [];
+    let pagesSent = 0;
     for (let i = 0; i < frames.length; i++) {
       const frame = frames[i];
       try {
@@ -879,8 +933,21 @@ async function exportPrintFrames() {
           format: 'PNG',
           constraint: { type: 'SCALE', value: 2 },
         });
-        pngPages.push(Array.from(pngBytes));
-        sendProgress(`  Rendered page ${pngPages.length}/${frames.length}`);
+        // Ship each page to the UI immediately as a Uint8Array. Converting to a
+        // plain number[] and batching whole groups makes the plugin bridge
+        // deep-unwrap millions of boxed Numbers at once, which aborts the
+        // sandbox VM on large exports.
+        figma.ui.postMessage({
+          type: 'EXPORT_PDF_PAGE',
+          payload: {
+            filename: groupKey + '.pdf',
+            bytes: pngBytes,
+            pageWidth: 612,
+            pageHeight: 792,
+          },
+        });
+        pagesSent++;
+        sendProgress(`  Rendered page ${pagesSent}/${frames.length}`);
       } catch (err: any) {
         sendProgress(`ERROR exporting frame "${frame.name}": ${err.message || err}`, 'error');
         sendProgress(`Skipping this frame and continuing...`, 'warn');
@@ -888,21 +955,273 @@ async function exportPrintFrames() {
       }
     }
 
-    if (pngPages.length > 0) {
-      figma.ui.postMessage({
-        type: 'EXPORT_PDF_GROUP',
-        payload: {
-          filename: groupKey + '.pdf',
-          pages: pngPages,
-          pageWidth: 612,
-          pageHeight: 792,
-        },
-      });
-    } else {
+    if (pagesSent === 0) {
       sendProgress(`No pages successfully exported for ${groupKey}.pdf`, 'error');
     }
   }
 
   sendProgress(`Export complete — ${groupKeys.length} PDFs.`);
   figma.ui.postMessage({ type: 'EXPORT_COMPLETE', payload: null });
+}
+
+// ---------------------------------------------------------------------------
+// Export for Tabletop Simulator
+// ---------------------------------------------------------------------------
+//
+// TTS imports a "custom deck" from a single stitched sheet image: a tight grid
+// of card faces (≤10 wide × 7 tall = 70 per sheet), plus a matching sheet of
+// backs. We always emit unique backs (one back per card, same grid + order) so
+// there's a single code path — if the backs happen to be identical, TTS is none
+// the wiser. FaceURL/BackURL must be hosted URLs, so we can't produce a
+// self-contained file; instead we ship the sheet PNGs and a README telling the
+// user to feed them into TTS's in-game Custom Deck wizard (which uploads to
+// Steam Cloud and fills the URLs).
+//
+// Source of card art: the persistent `Print -- <Tab> -- Fronts/Backs -- NN`
+// frames left on the canvas by the sync run. The working `<Tab> Fronts/Backs`
+// frames are removed at the end of sync, so the Print frames are the only
+// persistent per-card render. Each card there is a detached frame still named
+// after its card (`row.name`), and fronts/backs share those names — so we pair
+// fronts↔backs by node name and lay them out in alphabetical (deck) order,
+// independent of the print grid's layout or its back-side row mirroring.
+
+const TTS_MAX_PER_SHEET = 70; // 10 cols × 7 rows — TTS practical maximum
+const TTS_MAX_COLS = 10;
+const TTS_MAX_DIM = 4096; // keep each sheet texture ≤ 4096px per axis (TTS guideline)
+const TTS_MAX_SCALE = 2; // matches the PDF path; caps memory on big exports
+
+interface TtsSheetSpec {
+  frame: FrameNode;
+  cols: number;
+  rows: number;
+  count: number;
+}
+
+/** Sanitize a tab name into a filename-safe slug. */
+function ttsFileSlug(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'deck';
+}
+
+/** Collect the detached card nodes from a card type's Print frames for one side,
+ *  in sheet order (01, 02, …) then child order within each sheet. */
+function gatherPrintCards(tabName: string, side: 'Fronts' | 'Backs'): SceneNode[] {
+  const prefix = `Print -- ${tabName} -- ${side} -- `;
+  const frames = figma.currentPage.children.filter(
+    (n): n is FrameNode => n.type === 'FRAME' && n.name.startsWith(prefix)
+  );
+  frames.sort((a, b) => a.name.localeCompare(b.name));
+  const cards: SceneNode[] = [];
+  for (const f of frames) {
+    for (const child of f.children) cards.push(child);
+  }
+  return cards;
+}
+
+/** Grid dimensions for a sheet of `n` cards (row-major, ≤10 wide, ≤70 total). */
+function ttsGrid(n: number): { cols: number; rows: number } {
+  const cols = Math.min(TTS_MAX_COLS, n);
+  const rows = Math.ceil(n / cols);
+  return { cols, rows };
+}
+
+/** Build tight, margin-free grid frames (one per ≤70-card chunk) from card nodes.
+ *  Entries in `nodes` may be null (a card with no matching back) → blank cell,
+ *  which keeps face and back grids index-aligned. Frames are placed off-canvas;
+ *  exportAsync renders each frame's own subtree, so their positions don't matter. */
+function buildTtsSheets(
+  tabName: string,
+  side: 'Faces' | 'Backs',
+  nodes: (SceneNode | null)[],
+  cardW: number,
+  cardH: number
+): TtsSheetSpec[] {
+  const specs: TtsSheetSpec[] = [];
+  let sheetNumber = 1;
+
+  for (let start = 0; start < nodes.length; start += TTS_MAX_PER_SHEET) {
+    const chunk = nodes.slice(start, start + TTS_MAX_PER_SHEET);
+    const { cols, rows } = ttsGrid(chunk.length);
+
+    const frame = figma.createFrame();
+    frame.name = `TTS -- ${tabName} -- ${side} -- ${String(sheetNumber).padStart(2, '0')}`;
+    frame.resize(cols * cardW, rows * cardH);
+    frame.x = -10000;
+    frame.y = 0;
+    frame.clipsContent = true;
+    frame.fills = [{ type: 'SOLID', color: { r: 1, g: 1, b: 1 } }];
+
+    for (let i = 0; i < chunk.length; i++) {
+      const node = chunk[i];
+      if (!node) continue; // leave the cell blank
+      try {
+        const clone = node.clone();
+        clone.x = (i % cols) * cardW;
+        clone.y = Math.floor(i / cols) * cardH;
+        frame.appendChild(clone);
+      } catch (err: any) {
+        sendProgress(`  Warning: could not place card ${i + 1} on ${side} sheet: ${err.message || err}`, 'warn');
+      }
+    }
+
+    specs.push({ frame, cols, rows, count: chunk.length });
+    sheetNumber++;
+  }
+
+  return specs;
+}
+
+/** Render one TTS grid frame to PNG and ship it to the UI. Scale is chosen so
+ *  neither axis exceeds TTS_MAX_DIM, capped at TTS_MAX_SCALE. */
+async function exportTtsFrame(frame: FrameNode, filename: string): Promise<boolean> {
+  // Reload fonts defensively — in a fresh session the Print-frame text may not
+  // have its fonts loaded yet, which would render fallback glyphs (same guard
+  // the PDF path uses).
+  const textNodes = frame.findAll((n) => n.type === 'TEXT') as TextNode[];
+  for (const tn of textNodes) {
+    const len = tn.characters.length;
+    try {
+      if (len > 0) {
+        for (const font of tn.getRangeAllFontNames(0, len)) await figma.loadFontAsync(font);
+      } else if (tn.fontName !== figma.mixed) {
+        await figma.loadFontAsync(tn.fontName as FontName);
+      }
+    } catch {
+      // Non-fatal; keep going and let export render what it can.
+    }
+  }
+
+  const w = frame.width;
+  const h = frame.height;
+  let scale = Math.min(TTS_MAX_SCALE, TTS_MAX_DIM / w, TTS_MAX_DIM / h);
+  if (!(scale > 0)) scale = 1;
+
+  try {
+    sendProgress(`  Rendering ${filename} (${Math.round(w * scale)}×${Math.round(h * scale)}px)...`);
+    const pngBytes = await frame.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale } });
+    figma.ui.postMessage({ type: 'EXPORT_TTS_SHEET', payload: { filename, bytes: pngBytes } });
+    return true;
+  } catch (err: any) {
+    sendProgress(`ERROR exporting ${filename}: ${err.message || err}`, 'error');
+    return false;
+  }
+}
+
+async function exportTtsDecks() {
+  // Discover card types from the persistent Print -- <Tab> -- Fronts -- NN frames.
+  const frontFrames = figma.currentPage.children.filter(
+    (n): n is FrameNode => n.type === 'FRAME' && /^Print -- .+ -- Fronts -- \d+$/.test(n.name)
+  );
+
+  if (frontFrames.length === 0) {
+    sendProgress('No print frames found. Run Sync & Build first.', 'error');
+    figma.ui.postMessage({ type: 'EXPORT_TTS_COMPLETE', payload: null });
+    return;
+  }
+
+  const tabNames: string[] = [];
+  for (const f of frontFrames) {
+    const parts = f.name.split(' -- ');
+    if (parts.length >= 4 && tabNames.indexOf(parts[1]) === -1) tabNames.push(parts[1]);
+  }
+  tabNames.sort();
+
+  const readme: string[] = [
+    'TABLETOP SIMULATOR — DECK IMPORT',
+    '=================================',
+    '',
+    'These are stitched card sheets (faces + matching backs). To import each deck:',
+    '',
+    '  1. In TTS: Objects > Components > Custom > Deck',
+    '  2. Face  = the "-faces-" PNG   Back = the "-backs-" PNG',
+    '     (when asked, choose Cloud upload so TTS hosts the image and fills the URL)',
+    '  3. Set Width and Height to the grid values shown below',
+    '  4. Set Number of cards to the count shown',
+    '  5. Turn ON "Unique Backs" and "Back is Hidden"',
+    '  6. Click Import.',
+    '',
+    'Sheets hold up to 70 cards (10×7); decks larger than that are split into',
+    'multiple numbered sheets — import each as its own deck (or merge in-game).',
+    '',
+    '---------------------------------',
+    '',
+  ];
+
+  const tempFrames: FrameNode[] = [];
+  let anySheets = false;
+
+  for (const tab of tabNames) {
+    const fronts = gatherPrintCards(tab, 'Fronts').sort((a, b) => a.name.localeCompare(b.name));
+    if (fronts.length === 0) continue;
+
+    const backsRaw = gatherPrintCards(tab, 'Backs');
+    if (backsRaw.length === 0) {
+      sendProgress(`"${tab}": no back print frames — skipping TTS deck (backs are required).`, 'warn');
+      continue;
+    }
+
+    // Pair each front with its back by node name; deck order = fronts alphabetical.
+    const backMap = new Map<string, SceneNode>();
+    for (const b of backsRaw) if (!backMap.has(b.name)) backMap.set(b.name, b);
+
+    const orderedBacks: (SceneNode | null)[] = [];
+    let missingBacks = 0;
+    for (const f of fronts) {
+      const b = backMap.get(f.name) || null;
+      if (!b) missingBacks++;
+      orderedBacks.push(b);
+    }
+    if (missingBacks > 0) {
+      sendProgress(`"${tab}": ${missingBacks} card(s) had no matching back — those back cells left blank.`, 'warn');
+    }
+
+    const fW = fronts[0].width;
+    const fH = fronts[0].height;
+    const bW = backsRaw[0].width;
+    const bH = backsRaw[0].height;
+
+    sendProgress(`Building TTS sheets for "${tab}" (${fronts.length} cards)...`);
+
+    const faceSpecs = buildTtsSheets(tab, 'Faces', fronts, fW, fH);
+    const backSpecs = buildTtsSheets(tab, 'Backs', orderedBacks, bW, bH);
+    for (const s of faceSpecs) tempFrames.push(s.frame);
+    for (const s of backSpecs) tempFrames.push(s.frame);
+
+    const slug = ttsFileSlug(tab);
+    readme.push(`Deck: ${tab}  —  ${fronts.length} card(s), ${faceSpecs.length} sheet(s)`);
+
+    for (let s = 0; s < faceSpecs.length; s++) {
+      const fs = faceSpecs[s];
+      const bs = backSpecs[s];
+      const num = String(s + 1).padStart(2, '0');
+      const faceName = `${slug}-faces-${num}.png`;
+      const backName = `${slug}-backs-${num}.png`;
+
+      const okFace = await exportTtsFrame(fs.frame, faceName);
+      const okBack = bs ? await exportTtsFrame(bs.frame, backName) : false;
+      if (okFace) anySheets = true;
+
+      readme.push(`  Sheet ${num}: ${faceName}${okBack ? ` + ${backName}` : ''}`);
+      readme.push(`    Width=${fs.cols}  Height=${fs.rows}  Number=${fs.count}  (Unique Backs ON, Back is Hidden ON)`);
+    }
+    readme.push('');
+  }
+
+  // Remove the temporary grid frames now that they've been rendered.
+  for (const f of tempFrames) {
+    try {
+      f.remove();
+    } catch {
+      // already gone
+    }
+  }
+
+  if (!anySheets) {
+    sendProgress('No TTS sheets exported.', 'error');
+    figma.ui.postMessage({ type: 'EXPORT_TTS_COMPLETE', payload: null });
+    return;
+  }
+
+  figma.ui.postMessage({ type: 'EXPORT_TTS_README', payload: { text: readme.join('\n') } });
+  sendProgress('TTS export complete.');
+  figma.ui.postMessage({ type: 'EXPORT_TTS_COMPLETE', payload: null });
 }
