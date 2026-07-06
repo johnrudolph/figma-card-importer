@@ -968,7 +968,7 @@ async function exportPrintFrames() {
 // Export for Tabletop Simulator
 // ---------------------------------------------------------------------------
 //
-// TTS imports a "custom deck" from a single stitched sheet image: a tight grid
+// TTS builds a "custom deck" from a single stitched sheet image: a tight grid
 // of card faces (≤10 wide × 7 tall = 70 per sheet), plus a matching sheet of
 // backs. We always emit unique backs (one back per card, same grid + order) so
 // there's a single code path — if the backs happen to be identical, TTS is none
@@ -1137,13 +1137,13 @@ async function exportTtsDecks() {
     'TABLETOP SIMULATOR — DECK IMPORT',
     '=================================',
     '',
-    '  *** CRITICAL: TTS defaults the import to 10 x 7. That is almost never',
-    '  *** right for these sheets. You MUST change Width and Height to the exact',
-    '  *** values shown for each sheet below (also baked into every filename,',
-    '  *** e.g. "..._10x6_" means Width=10, Height=6). If you leave the 10x7',
-    '  *** default, the cards will drift/misalign further down the deck.',
+    '  *** CRITICAL: TTS defaults the Width x Height to 10 x 7. That is almost',
+    '  *** never right for these sheets. You MUST change Width and Height to the',
+    '  *** exact values shown for each sheet below (also baked into every',
+    '  *** filename, e.g. "..._10x6_" means Width=10, Height=6). If you leave the',
+    '  *** 10x7 default, the cards will drift/misalign further down the deck.',
     '',
-    'These are stitched card sheets (faces + matching backs). To import each deck:',
+    'These are stitched card sheets (faces + matching backs). For each deck:',
     '',
     '  1. In TTS: Objects > Components > Custom > Deck',
     '  2. Face  = the "-faces-" PNG   Back = the "-backs-" PNG',
@@ -1151,10 +1151,10 @@ async function exportTtsDecks() {
     '  3. Set Width and Height to the EXACT grid values shown below (NOT 10x7)',
     '  4. Set Number of cards to the count shown',
     '  5. Turn ON "Unique Backs" and "Back is Hidden"',
-    '  6. Click Import.',
+    '  6. Click the load/confirm button.',
     '',
-    'Sheets hold up to 70 cards (10×7max); decks larger than that are split into',
-    'multiple numbered sheets — import each as its own deck (or merge in-game).',
+    'Sheets hold up to 70 cards (10x7 max); decks larger than that are split into',
+    'multiple numbered sheets — load each as its own deck (or merge in-game).',
     '',
     '---------------------------------',
     '',
@@ -1207,7 +1207,7 @@ async function exportTtsDecks() {
       const fs = faceSpecs[s];
       const bs = backSpecs[s];
       const num = String(s + 1).padStart(2, '0');
-      // Bake the grid + card count into the filename so the correct import
+      // Bake the grid + card count into every filename so the exact TTS
       // values (Width x Height, Number) are impossible to miss.
       const dims = `${fs.cols}x${fs.rows}_${fs.count}cards`;
       const faceName = `${slug}-faces-${num}_${dims}.png`;
