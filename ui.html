@@ -382,6 +382,10 @@ window.onmessage = function(event) {
       pendingTtsFiles.push({ name: msg.payload.filename, data: new Uint8Array(msg.payload.bytes) });
       break;
 
+    case 'EXPORT_TTS_SCRIPT':
+      pendingTtsFiles.push({ name: msg.payload.filename, data: new TextEncoder().encode(msg.payload.text) });
+      break;
+
     case 'EXPORT_TTS_README':
       ttsReadme = msg.payload.text || '';
       break;
