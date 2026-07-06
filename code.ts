@@ -1017,10 +1017,24 @@ function gatherPrintCards(tabName: string, side: 'Fronts' | 'Backs'): SceneNode[
   return cards;
 }
 
-/** Grid dimensions for a sheet of `n` cards (row-major, ≤10 wide, ≤70 total). */
+/** Grid dimensions for a sheet of `n` cards (row-major, ≤10 wide, ≤70 total).
+ *  TTS's Custom Deck wizard enforces a MINIMUM of 2 for both Width and Height —
+ *  a 1-row (or 1-column) sheet gets sliced into 2, cutting every card in half.
+ *  So we rebalance any single-row layout into at least 2 rows, and clamp both
+ *  dimensions to ≥ 2. Unused trailing cells are fine (Number of cards bounds it). */
 function ttsGrid(n: number): { cols: number; rows: number } {
-  const cols = Math.min(TTS_MAX_COLS, n);
-  const rows = Math.ceil(n / cols);
+  let cols = Math.min(TTS_MAX_COLS, n);
+  let rows = Math.ceil(n / cols);
+
+  // Small decks (n ≤ 10) would otherwise be a single row — reshape to 2 rows.
+  if (rows < 2) {
+    cols = Math.min(TTS_MAX_COLS, Math.ceil(n / 2));
+    rows = Math.ceil(n / cols);
+  }
+
+  // Guarantee both dimensions clear TTS's minimum of 2.
+  cols = Math.max(2, cols);
+  rows = Math.max(2, rows);
   return { cols, rows };
 }
 
