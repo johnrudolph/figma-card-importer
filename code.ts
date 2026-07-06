@@ -137,7 +137,8 @@ async function syncInstances(
   const activeNames = new Set(rows.map((r) => r.name.toLowerCase()));
   const result = new Map<string, InstanceNode>();
 
-  for (const row of rows) {
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
     const key = row.name.toLowerCase();
     let instance = existing.get(key);
     if (!instance) {
@@ -146,6 +147,8 @@ async function syncInstances(
       sendProgress(`Created ${side} instance for "${row.name}"`);
     }
     instance.name = row.name;
+    // Record the Google Sheet row index so PDF + TTS output follow sheet order.
+    instance.setPluginData(SHEET_INDEX_KEY, String(i));
     result.set(row.name, instance);
   }
 
@@ -216,13 +219,31 @@ async function populateInstanceAsync(
 }
 
 // ---------------------------------------------------------------------------
-// Sort Instances Alphabetically
+// Sort Instances by Google Sheet order
 // ---------------------------------------------------------------------------
+
+// Plugin-data key holding each card's original Google Sheet row index. Stamped
+// at sync time; survives clone()/detachInstance() into the print frames, so the
+// PDF and TTS exports can both reproduce the sheet's order instead of A–Z.
+const SHEET_INDEX_KEY = 'sheetIndex';
+
+/** Read a node's stamped sheet-row index (cards with none sort to the end). */
+function sheetOrderKey(node: SceneNode): number {
+  const raw = node.getPluginData(SHEET_INDEX_KEY);
+  if (!raw) return Number.MAX_SAFE_INTEGER;
+  const n = parseInt(raw, 10);
+  return isNaN(n) ? Number.MAX_SAFE_INTEGER : n;
+}
+
+/** Comparator: Google Sheet row order, with card name as a stable tiebreaker. */
+function bySheetOrder(a: SceneNode, b: SceneNode): number {
+  return sheetOrderKey(a) - sheetOrderKey(b) || a.name.localeCompare(b.name);
+}
 
 function sortAndLayoutInstances(frame: FrameNode, cardWidth: number, cardHeight: number) {
   const instances = frame.children
     .filter((n): n is InstanceNode => n.type === 'INSTANCE')
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .sort(bySheetOrder);
 
   const gap = 8;
   let x = 0;
@@ -599,7 +620,7 @@ async function runSync(payload: RunSyncPayload) {
 
     const sortedFronts = frontsFrame.children
       .filter((n): n is InstanceNode => n.type === 'INSTANCE')
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .sort(bySheetOrder);
 
     sendProgress(`Building print sheets for "${group.tabName}"...`);
 
@@ -613,7 +634,7 @@ async function runSync(payload: RunSyncPayload) {
     if (backsFrame) {
       const sortedBacks = backsFrame.children
         .filter((n): n is InstanceNode => n.type === 'INSTANCE')
-        .sort((a, b) => a.name.localeCompare(b.name));
+        .sort(bySheetOrder);
 
       const backPrintY = printGroupY + PRINT_HEIGHT + 32;
       group.backSheets = buildPrintSheets(
@@ -1178,7 +1199,11 @@ async function exportTtsDecks() {
   let anySheets = false;
 
   for (const tab of tabNames) {
-    const fronts = gatherPrintCards(tab, 'Fronts').sort((a, b) => a.name.localeCompare(b.name));
+    // Gather order is already sheet order: the front print frames were built
+    // from sheet-ordered instances, and gatherPrintCards preserves frame (01,
+    // 02, …) then child append order. Backs are paired by name below, so they
+    // inherit this same order regardless of the print frames' row-mirroring.
+    const fronts = gatherPrintCards(tab, 'Fronts');
     if (fronts.length === 0) continue;
 
     const backsRaw = gatherPrintCards(tab, 'Backs');
