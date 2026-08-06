@@ -6,6 +6,8 @@ interface CardTypeConfig {
   enabled: boolean;
   frontComponentKey: string;
   backComponentKey: string;
+  /** Sheet column whose value keys the art_bank lookup; blank = the card's name. */
+  artField?: string;
 }
 
 interface Settings {
@@ -13,10 +15,20 @@ interface Settings {
   cardTypes: CardTypeConfig[];
 }
 
+/** A bold/italic span within a field's trimmed cell text (UTF-16 indices). */
+interface FormatRun {
+  start: number;
+  end: number;
+  bold: boolean;
+  italic: boolean;
+}
+
 interface CardRow {
   name: string;        // Unique key (deduplicated: "Show solidarity (2)")
   _displayName: string; // Original name for display on the card
-  [field: string]: string;
+  /** Rich-text runs from the sheet, keyed by lowercased field name. */
+  _runs?: { [field: string]: FormatRun[] };
+  [field: string]: string | { [field: string]: FormatRun[] } | undefined;
 }
 
 interface RunSyncPayload {
@@ -180,13 +192,110 @@ async function syncInstances(
 }
 
 // ---------------------------------------------------------------------------
+// Rich Text — apply the sheet's bold/italic runs via font-style variants
+// ---------------------------------------------------------------------------
+
+/** Lowercased family -> available style names, built lazily on first use. */
+let fontStylesByFamily: Map<string, string[]> | null = null;
+
+async function getFontStylesByFamily(): Promise<Map<string, string[]>> {
+  if (!fontStylesByFamily) {
+    const fonts = await figma.listAvailableFontsAsync();
+    fontStylesByFamily = new Map();
+    for (const f of fonts) {
+      const fam = f.fontName.family.toLowerCase();
+      const styles = fontStylesByFamily.get(fam);
+      if (styles) styles.push(f.fontName.style);
+      else fontStylesByFamily.set(fam, [f.fontName.style]);
+    }
+  }
+  return fontStylesByFamily;
+}
+
+/**
+ * Pick the family style matching the requested bold/italic flags, starting
+ * from the layer's current style so "Medium" + italic prefers "Medium Italic".
+ * Style names vary by family, so we walk a candidate list case-insensitively.
+ * Returns null when the family has no suitable variant.
+ */
+function resolveVariantStyle(
+  available: string[],
+  baseStyle: string,
+  bold: boolean,
+  italic: boolean
+): string | null {
+  const weight = baseStyle
+    .replace(/\s*(italic|oblique)\s*/i, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const candidates: string[] = [];
+  if (bold && italic) {
+    candidates.push(
+      'Bold Italic', 'BoldItalic', 'Bold Oblique',
+      'Semi Bold Italic', 'SemiBold Italic', 'Bold', 'Italic'
+    );
+  } else if (bold) {
+    candidates.push('Bold', 'Semi Bold', 'SemiBold', 'Demi Bold', 'DemiBold', 'Medium');
+  } else if (italic) {
+    if (weight && weight.toLowerCase() !== 'regular') {
+      candidates.push(weight + ' Italic', weight + ' Oblique');
+    }
+    candidates.push('Italic', 'Oblique');
+  }
+  for (const cand of candidates) {
+    const match = available.find((s) => s.toLowerCase() === cand.toLowerCase());
+    if (match) return match;
+  }
+  return null;
+}
+
+/** Families we've already warned about, so the log isn't spammed per card. */
+const missingVariantWarned = new Set<string>();
+
+/** Apply bold/italic runs to a text node whose characters are already set. */
+async function applyFormatRuns(tn: TextNode, runs: FormatRun[]) {
+  const len = tn.characters.length;
+  if (len === 0) return;
+  const stylesByFamily = await getFontStylesByFamily();
+
+  for (const run of runs) {
+    const start = Math.max(0, Math.min(run.start, len));
+    const end = Math.max(0, Math.min(run.end, len));
+    if (end <= start || (!run.bold && !run.italic)) continue;
+
+    let baseFont = tn.getRangeFontName(start, end);
+    if (baseFont === figma.mixed) baseFont = tn.getRangeFontName(start, start + 1);
+    if (baseFont === figma.mixed) continue;
+    const font = baseFont as FontName;
+
+    const styles = stylesByFamily.get(font.family.toLowerCase()) || [];
+    const variantStyle = resolveVariantStyle(styles, font.style, run.bold, run.italic);
+    if (!variantStyle) {
+      const flags = run.bold && run.italic ? 'bold italic' : run.bold ? 'bold' : 'italic';
+      const warnKey = font.family + '/' + flags;
+      if (!missingVariantWarned.has(warnKey)) {
+        missingVariantWarned.add(warnKey);
+        sendProgress(`Font "${font.family}" has no ${flags} style — kept plain text`, 'warn');
+      }
+      continue;
+    }
+    if (variantStyle === font.style) continue;
+
+    const variant: FontName = { family: font.family, style: variantStyle };
+    await figma.loadFontAsync(variant);
+    tn.setRangeFontName(start, end, variant);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Populate Fields
 // ---------------------------------------------------------------------------
 
 async function populateInstanceAsync(
   instance: InstanceNode,
   row: CardRow,
-  artBank: Map<string, Paint[]>
+  artBank: Map<string, Paint[]>,
+  artField?: string
 ) {
   const descendants = instance.findAll((n) => n.name.indexOf('#') !== -1);
 
@@ -194,20 +303,34 @@ async function populateInstanceAsync(
     const fieldName = extractFieldName(node.name);
     if (!fieldName) continue;
 
-    // Art field — fill from art_bank by card display name
+    // Art field — fill from art_bank, keyed by the configured art field
+    // (e.g. a Relic's "location" column) or the card's own display name.
     if (fieldName === 'art') {
-      const artKey = row._displayName.toLowerCase();
-      const artFills = artBank.get(artKey);
+      const useCustomField = artField && artField.toLowerCase() !== 'name';
+      const artKey = (useCustomField
+        ? getFieldValue(row, artField!)
+        : row._displayName
+      ).toLowerCase();
+      const artFills = artKey ? artBank.get(artKey) : undefined;
       if (artFills && 'fills' in node) {
         (node as GeometryMixin).fills = artFills;
+      } else if (useCustomField) {
+        sendProgress(
+          `No art for "${row.name}": ${artField} = "${artKey || '(empty)'}" not in art_bank`,
+          'warn'
+        );
       }
       continue;
     }
 
+    const fieldRuns = (row._runs && row._runs[fieldName]) || [];
+
     // For the "name" field, use the original display name (without dedup suffix)
     if (fieldName === 'name') {
       if (node.type === 'TEXT') {
-        (node as TextNode).characters = row._displayName;
+        const tn = node as TextNode;
+        tn.characters = row._displayName;
+        if (fieldRuns.length > 0) await applyFormatRuns(tn, fieldRuns);
       }
       continue;
     }
@@ -216,6 +339,7 @@ async function populateInstanceAsync(
     if (!matchingKey) continue;
 
     const value = row[matchingKey];
+    if (typeof value !== 'string') continue;
 
     // Show/Hide convention
     if (value.toLowerCase() === 'show') {
@@ -229,7 +353,9 @@ async function populateInstanceAsync(
 
     // Text field population (fonts are pre-loaded in bulk before this runs)
     if (node.type === 'TEXT') {
-      (node as TextNode).characters = value;
+      const tn = node as TextNode;
+      tn.characters = value;
+      if (fieldRuns.length > 0) await applyFormatRuns(tn, fieldRuns);
     }
   }
 }
@@ -555,8 +681,8 @@ async function runSync(payload: RunSyncPayload) {
     for (const row of rows) {
       const fi = frontInstances.get(row.name);
       const bi = backInstances.get(row.name);
-      if (fi) await populateInstanceAsync(fi, row, artBank);
-      if (bi) await populateInstanceAsync(bi, row, artBank);
+      if (fi) await populateInstanceAsync(fi, row, artBank, ct.artField);
+      if (bi) await populateInstanceAsync(bi, row, artBank, ct.artField);
     }
 
     // Verification pass — check for instances that failed to populate
@@ -580,16 +706,17 @@ async function runSync(payload: RunSyncPayload) {
               continue;
             }
             const matchingKey = Object.keys(row).find((k) => k.toLowerCase() === fieldName);
-            if (matchingKey && row[matchingKey] && tn.characters !== row[matchingKey]) {
-              const lowered = row[matchingKey].toLowerCase();
+            const expected = matchingKey ? row[matchingKey] : undefined;
+            if (typeof expected === 'string' && expected && tn.characters !== expected) {
+              const lowered = expected.toLowerCase();
               if (lowered === 'show' || lowered === 'hide') continue;
               sendProgress(
-                `VERIFY FAIL: "${row.name}" field "${fieldName}" expected="${row[matchingKey]}" got="${tn.characters}"`,
+                `VERIFY FAIL: "${row.name}" field "${fieldName}" expected="${expected}" got="${tn.characters}"`,
                 'error'
               );
               // Retry the set
               try {
-                tn.characters = row[matchingKey];
+                tn.characters = expected;
                 sendProgress(`  Retried setting "${fieldName}" on "${row.name}"`, 'info');
               } catch (retryErr: any) {
                 sendProgress(`  Retry failed: ${retryErr.message}`, 'error');

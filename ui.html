@@ -461,7 +461,9 @@ function createCardTypeRow(ct, index) {
     '<select class="ct-back-comp">' +
       '<option value="">-- Select component --</option>' +
     '</select>' +
-    '<div class="size-readout ct-back-size"></div>';
+    '<div class="size-readout ct-back-size"></div>' +
+    '<label>Art Field (optional)</label>' +
+    '<input type="text" class="ct-art-field" value="' + (ct.artField || '') + '" placeholder="Column that names the art (default: name)" />';
 
   // Populate selects
   var frontSelect = row.querySelector('.ct-front-comp');
@@ -541,6 +543,7 @@ function readCardTypesFromUI() {
       enabled: row.querySelector('.ct-enabled').checked,
       frontComponentKey: row.querySelector('.ct-front-comp').value,
       backComponentKey: row.querySelector('.ct-back-comp').value,
+      artField: row.querySelector('.ct-art-field').value.trim(),
     });
   });
 }
@@ -568,8 +571,90 @@ function renderRunSummary() {
 }
 
 // ---------------------------------------------------------------------------
-// Sync — fetches data via Google gviz CSV endpoint (no API key needed)
+// Sync — fetches data via the Sheets API grid-data endpoint, which includes
+// per-cell rich text (bold/italic runs) alongside the displayed values.
 // ---------------------------------------------------------------------------
+
+/**
+ * Normalize a grid cell's rich-text formatting into bold/italic runs over the
+ * TRIMMED cell text: [{start, end, bold, italic}]. Whole-cell bold/italic
+ * (effectiveFormat) is the base; textFormatRuns override it per-span, matching
+ * how Sheets itself resolves formatting. Returns [] when nothing is bold or
+ * italic, so plain cells cost nothing downstream.
+ */
+function extractCellRuns(cell) {
+  var raw = cell.formattedValue || '';
+  var trimmed = raw.trim();
+  if (!trimmed) return [];
+  // Run indices refer to the raw cell text; shift them left by the amount of
+  // leading whitespace we trim off before the value is sent to Figma.
+  var lead = raw.length - raw.replace(/^\s+/, '').length;
+
+  var base = (cell.effectiveFormat && cell.effectiveFormat.textFormat) || {};
+  var fmtRuns = cell.textFormatRuns;
+  var segments = [];
+  if (fmtRuns && fmtRuns.length) {
+    for (var i = 0; i < fmtRuns.length; i++) {
+      var segStart = fmtRuns[i].startIndex || 0;
+      var segEnd = (i + 1 < fmtRuns.length) ? (fmtRuns[i + 1].startIndex || 0) : raw.length;
+      var f = fmtRuns[i].format || {};
+      segments.push({
+        start: segStart,
+        end: segEnd,
+        bold: f.bold !== undefined ? f.bold : !!base.bold,
+        italic: f.italic !== undefined ? f.italic : !!base.italic
+      });
+    }
+  } else if (base.bold || base.italic) {
+    segments.push({ start: 0, end: raw.length, bold: !!base.bold, italic: !!base.italic });
+  }
+
+  var runs = [];
+  for (var s = 0; s < segments.length; s++) {
+    var seg = segments[s];
+    if (!seg.bold && !seg.italic) continue;
+    var start = Math.max(0, Math.min(seg.start - lead, trimmed.length));
+    var end = Math.max(0, Math.min(seg.end - lead, trimmed.length));
+    if (end > start) runs.push({ start: start, end: end, bold: seg.bold, italic: seg.italic });
+  }
+  return runs;
+}
+
+/**
+ * Convert a grid-data response for one tab into { rows, runsGrid }: rows is
+ * the same shape the old `values` endpoint returned (array of string arrays),
+ * runsGrid is the parallel array of per-cell bold/italic runs. Respects the
+ * API's startRow/startColumn offsets (present when leading rows/cols are empty).
+ */
+function parseGridData(data) {
+  var grid = (((data.sheets || [])[0] || {}).data || [])[0] || {};
+  var rowData = grid.rowData || [];
+  var startRow = grid.startRow || 0;
+  var startCol = grid.startColumn || 0;
+
+  var rows = [];
+  var runsGrid = [];
+  for (var r = 0; r < startRow; r++) {
+    rows.push([]);
+    runsGrid.push([]);
+  }
+  for (var i = 0; i < rowData.length; i++) {
+    var cells = rowData[i].values || [];
+    var rowVals = [];
+    var rowRuns = [];
+    for (var c = 0; c < startCol; c++) {
+      rowVals.push('');
+      rowRuns.push([]);
+    }
+    for (var j = 0; j < cells.length; j++) {
+      rowVals.push(cells[j].formattedValue || '');
+      rowRuns.push(extractCellRuns(cells[j]));
+    }
+    rows.push(rowVals);
+    runsGrid.push(rowRuns);
+  }
+  return { rows: rows, runsGrid: runsGrid };
+}
 async function runSync() {
   if (syncing) return;
 
@@ -603,8 +688,11 @@ async function runSync() {
     var ct = enabled[t];
     try {
       log('Fetching tab "' + ct.tabName + '"...');
+      var fields = 'sheets(data(startRow,startColumn,rowData(values(formattedValue,effectiveFormat.textFormat,textFormatRuns))))';
       var url = 'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId +
-                '/values/' + encodeURIComponent(ct.tabName) + '?key=' + settings.apiKey;
+                '?ranges=' + encodeURIComponent(ct.tabName) +
+                '&fields=' + encodeURIComponent(fields) +
+                '&key=' + settings.apiKey;
       var resp = await fetch(url);
       if (!resp.ok) {
         var errData = await resp.json().catch(function() { return {}; });
@@ -612,7 +700,9 @@ async function runSync() {
         throw new Error(errMsg);
       }
       var data = await resp.json();
-      var rows = data.values || [];
+      var parsed = parseGridData(data);
+      var rows = parsed.rows;
+      var runsGrid = parsed.runsGrid;
 
       if (rows.length < 2) {
         log('Tab "' + ct.tabName + '" has no data rows, skipping.', 'warn');
@@ -651,11 +741,19 @@ async function runSync() {
         }
 
         var obj = { name: cardName, _displayName: baseName };
+        var objRuns = {}; // bold/italic runs per lowercased field name
+        var rowRuns = runsGrid[i] || [];
         for (var j = 0; j < headers.length; j++) {
+          var cellRuns = rowRuns[j] || [];
+          var headerLower = headers[j].toLowerCase();
           // Don't overwrite our deduplicated name with the raw sheet value
-          if (headers[j].toLowerCase() === 'name') continue;
-          obj[headers[j]] = (row[j] || '').trim();
+          // (but do keep the name cell's formatting runs).
+          if (headerLower !== 'name') {
+            obj[headers[j]] = (row[j] || '').trim();
+          }
+          if (cellRuns.length) objRuns[headerLower] = cellRuns;
         }
+        if (Object.keys(objRuns).length > 0) obj._runs = objRuns;
         cardRows.push(obj);
       }
       if (skippedCount > 0) {
@@ -1086,6 +1184,7 @@ document.getElementById('add-card-type-btn').onclick = function() {
     enabled: true,
     frontComponentKey: '',
     backComponentKey: '',
+    artField: '',
   });
   renderCardTypes();
 };
