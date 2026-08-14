@@ -196,12 +196,25 @@
     <h3>Card Types</h3>
     <div id="run-summary"></div>
 
-    <button class="btn-primary" id="sync-btn" style="width:100%; margin-top: 12px;">
+    <div class="toggle-row" style="margin-top: 12px;">
+      <label class="toggle-switch" style="margin-bottom:0;">
+        <input type="checkbox" id="print-only-toggle" />
+        <span class="toggle-slider"></span>
+      </label>
+      <span style="font-size:11px; color:#666;">Only rows where &ldquo;print&rdquo; is checked</span>
+    </div>
+    <div class="hint" style="margin-top:2px;">Needs a &ldquo;print&rdquo; checkbox column in the sheet</div>
+
+    <button class="btn-primary" id="sync-btn" style="width:100%; margin-top: 8px;">
       Sync &amp; Build
     </button>
 
     <button class="btn-secondary" id="export-btn" style="width:100%; margin-top: 6px;" disabled>
       Export Print PDFs
+    </button>
+
+    <button class="btn-secondary" id="tts-btn" style="width:100%; margin-top: 6px;" disabled>
+      Export for Tabletop Sim
     </button>
 
     <div id="progress-log"></div>
@@ -220,6 +233,8 @@ var settings = {
 var components = []; // [{name, key}]
 var syncing = false;
 var pendingPdfs = []; // collected PDF groups during export
+var pendingTtsFiles = []; // collected sheet PNGs during TTS export
+var ttsReadme = ''; // import instructions text for the TTS ZIP
 
 // ---------------------------------------------------------------------------
 // URL Parsing
@@ -345,20 +360,47 @@ window.onmessage = function(event) {
       document.getElementById('sync-btn').disabled = false;
       document.getElementById('sync-btn').textContent = 'Sync & Build';
       document.getElementById('export-btn').disabled = false;
+      document.getElementById('tts-btn').disabled = false;
       break;
 
     case 'PRINT_FRAMES_STATUS':
       if (msg.payload.exists) {
         document.getElementById('export-btn').disabled = false;
+        document.getElementById('tts-btn').disabled = false;
       }
       break;
 
-    case 'EXPORT_PDF_GROUP':
-      pendingPdfs.push({ filename: msg.payload.filename, pages: msg.payload.pages, pageWidth: msg.payload.pageWidth, pageHeight: msg.payload.pageHeight });
+    case 'EXPORT_PDF_PAGE': {
+      var entry = null;
+      for (var pi = 0; pi < pendingPdfs.length; pi++) {
+        if (pendingPdfs[pi].filename === msg.payload.filename) { entry = pendingPdfs[pi]; break; }
+      }
+      if (!entry) {
+        entry = { filename: msg.payload.filename, pages: [], pageWidth: msg.payload.pageWidth, pageHeight: msg.payload.pageHeight };
+        pendingPdfs.push(entry);
+      }
+      entry.pages.push(msg.payload.bytes);
       break;
+    }
 
     case 'EXPORT_COMPLETE':
       buildAndDownloadAllPdfs();
+      break;
+
+    case 'EXPORT_TTS_SHEET':
+      pendingTtsFiles.push({ name: msg.payload.filename, data: new Uint8Array(msg.payload.bytes) });
+      break;
+
+    case 'EXPORT_TTS_SCRIPT':
+      pendingTtsFiles.push({ name: msg.payload.filename, data: new TextEncoder().encode(msg.payload.text) });
+      break;
+
+    case 'EXPORT_TTS_README':
+      ttsReadme = msg.payload.text || '';
+      break;
+
+    case 'EXPORT_TTS_COMPLETE':
+      buildAndDownloadTts();
       break;
   }
 };
@@ -428,7 +470,11 @@ function createCardTypeRow(ct, index) {
     '<select class="ct-back-comp">' +
       '<option value="">-- Select component --</option>' +
     '</select>' +
-    '<div class="size-readout ct-back-size"></div>';
+    '<div class="size-readout ct-back-size"></div>' +
+    '<label>Front Art Field (optional)</label>' +
+    '<input type="text" class="ct-front-art-field" value="' + (ct.frontArtField || ct.artField || '') + '" placeholder="Column that names the front art (default: name)" />' +
+    '<label>Back Art Field (optional)</label>' +
+    '<input type="text" class="ct-back-art-field" value="' + (ct.backArtField || ct.artField || '') + '" placeholder="Column that names the back art (default: name)" />';
 
   // Populate selects
   var frontSelect = row.querySelector('.ct-front-comp');
@@ -508,6 +554,8 @@ function readCardTypesFromUI() {
       enabled: row.querySelector('.ct-enabled').checked,
       frontComponentKey: row.querySelector('.ct-front-comp').value,
       backComponentKey: row.querySelector('.ct-back-comp').value,
+      frontArtField: row.querySelector('.ct-front-art-field').value.trim(),
+      backArtField: row.querySelector('.ct-back-art-field').value.trim(),
     });
   });
 }
@@ -535,8 +583,90 @@ function renderRunSummary() {
 }
 
 // ---------------------------------------------------------------------------
-// Sync — fetches data via Google gviz CSV endpoint (no API key needed)
+// Sync — fetches data via the Sheets API grid-data endpoint, which includes
+// per-cell rich text (bold/italic runs) alongside the displayed values.
 // ---------------------------------------------------------------------------
+
+/**
+ * Normalize a grid cell's rich-text formatting into bold/italic runs over the
+ * TRIMMED cell text: [{start, end, bold, italic}]. Whole-cell bold/italic
+ * (effectiveFormat) is the base; textFormatRuns override it per-span, matching
+ * how Sheets itself resolves formatting. Returns [] when nothing is bold or
+ * italic, so plain cells cost nothing downstream.
+ */
+function extractCellRuns(cell) {
+  var raw = cell.formattedValue || '';
+  var trimmed = raw.trim();
+  if (!trimmed) return [];
+  // Run indices refer to the raw cell text; shift them left by the amount of
+  // leading whitespace we trim off before the value is sent to Figma.
+  var lead = raw.length - raw.replace(/^\s+/, '').length;
+
+  var base = (cell.effectiveFormat && cell.effectiveFormat.textFormat) || {};
+  var fmtRuns = cell.textFormatRuns;
+  var segments = [];
+  if (fmtRuns && fmtRuns.length) {
+    for (var i = 0; i < fmtRuns.length; i++) {
+      var segStart = fmtRuns[i].startIndex || 0;
+      var segEnd = (i + 1 < fmtRuns.length) ? (fmtRuns[i + 1].startIndex || 0) : raw.length;
+      var f = fmtRuns[i].format || {};
+      segments.push({
+        start: segStart,
+        end: segEnd,
+        bold: f.bold !== undefined ? f.bold : !!base.bold,
+        italic: f.italic !== undefined ? f.italic : !!base.italic
+      });
+    }
+  } else if (base.bold || base.italic) {
+    segments.push({ start: 0, end: raw.length, bold: !!base.bold, italic: !!base.italic });
+  }
+
+  var runs = [];
+  for (var s = 0; s < segments.length; s++) {
+    var seg = segments[s];
+    if (!seg.bold && !seg.italic) continue;
+    var start = Math.max(0, Math.min(seg.start - lead, trimmed.length));
+    var end = Math.max(0, Math.min(seg.end - lead, trimmed.length));
+    if (end > start) runs.push({ start: start, end: end, bold: seg.bold, italic: seg.italic });
+  }
+  return runs;
+}
+
+/**
+ * Convert a grid-data response for one tab into { rows, runsGrid }: rows is
+ * the same shape the old `values` endpoint returned (array of string arrays),
+ * runsGrid is the parallel array of per-cell bold/italic runs. Respects the
+ * API's startRow/startColumn offsets (present when leading rows/cols are empty).
+ */
+function parseGridData(data) {
+  var grid = (((data.sheets || [])[0] || {}).data || [])[0] || {};
+  var rowData = grid.rowData || [];
+  var startRow = grid.startRow || 0;
+  var startCol = grid.startColumn || 0;
+
+  var rows = [];
+  var runsGrid = [];
+  for (var r = 0; r < startRow; r++) {
+    rows.push([]);
+    runsGrid.push([]);
+  }
+  for (var i = 0; i < rowData.length; i++) {
+    var cells = rowData[i].values || [];
+    var rowVals = [];
+    var rowRuns = [];
+    for (var c = 0; c < startCol; c++) {
+      rowVals.push('');
+      rowRuns.push([]);
+    }
+    for (var j = 0; j < cells.length; j++) {
+      rowVals.push(cells[j].formattedValue || '');
+      rowRuns.push(extractCellRuns(cells[j]));
+    }
+    rows.push(rowVals);
+    runsGrid.push(rowRuns);
+  }
+  return { rows: rows, runsGrid: runsGrid };
+}
 async function runSync() {
   if (syncing) return;
 
@@ -557,12 +687,14 @@ async function runSync() {
     return;
   }
 
+  var printOnly = document.getElementById('print-only-toggle').checked;
+
   syncing = true;
   document.getElementById('sync-btn').disabled = true;
   document.getElementById('sync-btn').textContent = 'Syncing...';
   clearLog();
 
-  log('Fetching sheet data...');
+  log('Fetching sheet data...' + (printOnly ? ' (only rows marked "print")' : ''));
 
   var sheetData = {};
 
@@ -570,8 +702,11 @@ async function runSync() {
     var ct = enabled[t];
     try {
       log('Fetching tab "' + ct.tabName + '"...');
+      var fields = 'sheets(data(startRow,startColumn,rowData(values(formattedValue,effectiveFormat.textFormat,textFormatRuns))))';
       var url = 'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId +
-                '/values/' + encodeURIComponent(ct.tabName) + '?key=' + settings.apiKey;
+                '?ranges=' + encodeURIComponent(ct.tabName) +
+                '&fields=' + encodeURIComponent(fields) +
+                '&key=' + settings.apiKey;
       var resp = await fetch(url);
       if (!resp.ok) {
         var errData = await resp.json().catch(function() { return {}; });
@@ -579,7 +714,9 @@ async function runSync() {
         throw new Error(errMsg);
       }
       var data = await resp.json();
-      var rows = data.values || [];
+      var parsed = parseGridData(data);
+      var rows = parsed.rows;
+      var runsGrid = parsed.runsGrid;
 
       if (rows.length < 2) {
         log('Tab "' + ct.tabName + '" has no data rows, skipping.', 'warn');
@@ -588,24 +725,63 @@ async function runSync() {
 
       var headers = rows[0].map(function(h) { return h.trim(); });
       var nameIndex = -1;
+      var printIndex = -1;
       for (var h = 0; h < headers.length; h++) {
-        if (headers[h].toLowerCase() === 'name') { nameIndex = h; break; }
+        var hLower = headers[h].toLowerCase();
+        if (hLower === 'name' && nameIndex === -1) nameIndex = h;
+        if (hLower === 'print' && printIndex === -1) printIndex = h;
       }
 
-      if (nameIndex === -1) {
-        log('Tab "' + ct.tabName + '" has no "name" column, skipping.', 'error');
-        continue;
+      var filterByPrint = printOnly && printIndex !== -1;
+      if (printOnly && printIndex === -1) {
+        log('Tab "' + ct.tabName + '" has no "print" column — including all rows.', 'warn');
+      }
+
+      var hasNameCol = nameIndex !== -1;
+      if (!hasNameCol) {
+        log('Tab "' + ct.tabName + '" has no "name" column — printing every non-empty row, named by row number.', 'warn');
       }
 
       var cardRows = [];
       var skippedCount = 0;
+      var unprintedCount = 0;
       var nameCounts = {};
       for (var i = 1; i < rows.length; i++) {
         var row = rows[i];
-        var cardName = (row[nameIndex] || '').trim();
-        if (!cardName) {
-          skippedCount++;
-          continue;
+
+        // "Print only" filter: skip rows whose print checkbox isn't checked.
+        // Sheets checkboxes come through as TRUE/FALSE; also accept common
+        // hand-typed marks so plain-text columns work too.
+        if (filterByPrint) {
+          var pv = (row[printIndex] || '').trim().toLowerCase();
+          var isChecked = pv === 'true' || pv === 'yes' || pv === 'y' ||
+                          pv === 'x' || pv === '1' || pv === '✓' || pv === '✔';
+          if (!isChecked) {
+            unprintedCount++;
+            continue;
+          }
+        }
+
+        var cardName;
+        if (hasNameCol) {
+          cardName = (row[nameIndex] || '').trim();
+          if (!cardName) {
+            skippedCount++;
+            continue;
+          }
+        } else {
+          // No name column: every row is a card, keyed by its spreadsheet row
+          // number. Fully-empty rows (e.g. trailing blanks the API returns)
+          // are still skipped so they don't become blank cards.
+          var rowIsEmpty = true;
+          for (var e = 0; e < headers.length; e++) {
+            if ((row[e] || '').trim()) { rowIsEmpty = false; break; }
+          }
+          if (rowIsEmpty) {
+            skippedCount++;
+            continue;
+          }
+          cardName = 'Row ' + (i + 1);
         }
 
         // De-duplicate names by appending (2), (3), etc.
@@ -618,15 +794,29 @@ async function runSync() {
         }
 
         var obj = { name: cardName, _displayName: baseName };
+        var objRuns = {}; // bold/italic runs per lowercased field name
+        var rowRuns = runsGrid[i] || [];
         for (var j = 0; j < headers.length; j++) {
+          var cellRuns = rowRuns[j] || [];
+          var headerLower = headers[j].toLowerCase();
           // Don't overwrite our deduplicated name with the raw sheet value
-          if (headers[j].toLowerCase() === 'name') continue;
-          obj[headers[j]] = (row[j] || '').trim();
+          // (but do keep the name cell's formatting runs).
+          if (headerLower !== 'name') {
+            obj[headers[j]] = (row[j] || '').trim();
+          }
+          if (cellRuns.length) objRuns[headerLower] = cellRuns;
         }
+        if (Object.keys(objRuns).length > 0) obj._runs = objRuns;
         cardRows.push(obj);
       }
       if (skippedCount > 0) {
-        log('Skipped ' + skippedCount + ' rows with no name in "' + ct.tabName + '".', 'warn');
+        log('Skipped ' + skippedCount + (hasNameCol ? ' rows with no name in "' : ' empty rows in "') + ct.tabName + '".', 'warn');
+      }
+      if (unprintedCount > 0) {
+        log('Print filter: skipped ' + unprintedCount + ' unchecked row(s) in "' + ct.tabName + '".');
+      }
+      if (filterByPrint && cardRows.length === 0) {
+        log('No rows marked "print" in "' + ct.tabName + '" — tab skipped; any existing print frames are left as-is.', 'warn');
       }
 
       sheetData[ct.tabName] = cardRows;
@@ -702,6 +892,36 @@ async function buildAndDownloadAllPdfs() {
 
   document.getElementById('export-btn').disabled = false;
   document.getElementById('export-btn').textContent = 'Export Print PDFs';
+}
+
+/**
+ * Bundle the collected TTS sheet PNGs + README into a single ZIP download.
+ */
+function buildAndDownloadTts() {
+  var files = pendingTtsFiles.slice();
+  pendingTtsFiles = [];
+
+  var ttsBtn = document.getElementById('tts-btn');
+
+  if (files.length === 0) {
+    ttsBtn.disabled = false;
+    ttsBtn.textContent = 'Export for Tabletop Sim';
+    return;
+  }
+
+  if (ttsReadme) {
+    files.push({ name: 'TTS-IMPORT-README.txt', data: new TextEncoder().encode(ttsReadme) });
+  }
+
+  log('Packaging ' + files.length + ' TTS file(s) into ZIP...');
+  var zipBytes = buildZip(files);
+  var blob = new Blob([zipBytes], { type: 'application/zip' });
+  triggerDownload(blob, 'tts-decks.zip');
+  log('Downloaded tts-decks.zip');
+
+  ttsReadme = '';
+  ttsBtn.disabled = false;
+  ttsBtn.textContent = 'Export for Tabletop Sim';
 }
 
 /**
@@ -1023,6 +1243,8 @@ document.getElementById('add-card-type-btn').onclick = function() {
     enabled: true,
     frontComponentKey: '',
     backComponentKey: '',
+    frontArtField: '',
+    backArtField: '',
   });
   renderCardTypes();
 };
@@ -1059,6 +1281,14 @@ document.getElementById('export-btn').onclick = function() {
   document.getElementById('export-btn').textContent = 'Exporting...';
   pendingPdfs = [];
   postMsg('EXPORT_PRINTS');
+};
+
+document.getElementById('tts-btn').onclick = function() {
+  document.getElementById('tts-btn').disabled = true;
+  document.getElementById('tts-btn').textContent = 'Exporting...';
+  pendingTtsFiles = [];
+  ttsReadme = '';
+  postMsg('EXPORT_TTS');
 };
 
 // ---------------------------------------------------------------------------
