@@ -196,7 +196,16 @@
     <h3>Card Types</h3>
     <div id="run-summary"></div>
 
-    <button class="btn-primary" id="sync-btn" style="width:100%; margin-top: 12px;">
+    <div class="toggle-row" style="margin-top: 12px;">
+      <label class="toggle-switch" style="margin-bottom:0;">
+        <input type="checkbox" id="print-only-toggle" />
+        <span class="toggle-slider"></span>
+      </label>
+      <span style="font-size:11px; color:#666;">Only rows where &ldquo;print&rdquo; is checked</span>
+    </div>
+    <div class="hint" style="margin-top:2px;">Needs a &ldquo;print&rdquo; checkbox column in the sheet</div>
+
+    <button class="btn-primary" id="sync-btn" style="width:100%; margin-top: 8px;">
       Sync &amp; Build
     </button>
 
@@ -462,8 +471,10 @@ function createCardTypeRow(ct, index) {
       '<option value="">-- Select component --</option>' +
     '</select>' +
     '<div class="size-readout ct-back-size"></div>' +
-    '<label>Art Field (optional)</label>' +
-    '<input type="text" class="ct-art-field" value="' + (ct.artField || '') + '" placeholder="Column that names the art (default: name)" />';
+    '<label>Front Art Field (optional)</label>' +
+    '<input type="text" class="ct-front-art-field" value="' + (ct.frontArtField || ct.artField || '') + '" placeholder="Column that names the front art (default: name)" />' +
+    '<label>Back Art Field (optional)</label>' +
+    '<input type="text" class="ct-back-art-field" value="' + (ct.backArtField || ct.artField || '') + '" placeholder="Column that names the back art (default: name)" />';
 
   // Populate selects
   var frontSelect = row.querySelector('.ct-front-comp');
@@ -543,7 +554,8 @@ function readCardTypesFromUI() {
       enabled: row.querySelector('.ct-enabled').checked,
       frontComponentKey: row.querySelector('.ct-front-comp').value,
       backComponentKey: row.querySelector('.ct-back-comp').value,
-      artField: row.querySelector('.ct-art-field').value.trim(),
+      frontArtField: row.querySelector('.ct-front-art-field').value.trim(),
+      backArtField: row.querySelector('.ct-back-art-field').value.trim(),
     });
   });
 }
@@ -675,12 +687,14 @@ async function runSync() {
     return;
   }
 
+  var printOnly = document.getElementById('print-only-toggle').checked;
+
   syncing = true;
   document.getElementById('sync-btn').disabled = true;
   document.getElementById('sync-btn').textContent = 'Syncing...';
   clearLog();
 
-  log('Fetching sheet data...');
+  log('Fetching sheet data...' + (printOnly ? ' (only rows marked "print")' : ''));
 
   var sheetData = {};
 
@@ -711,24 +725,63 @@ async function runSync() {
 
       var headers = rows[0].map(function(h) { return h.trim(); });
       var nameIndex = -1;
+      var printIndex = -1;
       for (var h = 0; h < headers.length; h++) {
-        if (headers[h].toLowerCase() === 'name') { nameIndex = h; break; }
+        var hLower = headers[h].toLowerCase();
+        if (hLower === 'name' && nameIndex === -1) nameIndex = h;
+        if (hLower === 'print' && printIndex === -1) printIndex = h;
       }
 
-      if (nameIndex === -1) {
-        log('Tab "' + ct.tabName + '" has no "name" column, skipping.', 'error');
-        continue;
+      var filterByPrint = printOnly && printIndex !== -1;
+      if (printOnly && printIndex === -1) {
+        log('Tab "' + ct.tabName + '" has no "print" column — including all rows.', 'warn');
+      }
+
+      var hasNameCol = nameIndex !== -1;
+      if (!hasNameCol) {
+        log('Tab "' + ct.tabName + '" has no "name" column — printing every non-empty row, named by row number.', 'warn');
       }
 
       var cardRows = [];
       var skippedCount = 0;
+      var unprintedCount = 0;
       var nameCounts = {};
       for (var i = 1; i < rows.length; i++) {
         var row = rows[i];
-        var cardName = (row[nameIndex] || '').trim();
-        if (!cardName) {
-          skippedCount++;
-          continue;
+
+        // "Print only" filter: skip rows whose print checkbox isn't checked.
+        // Sheets checkboxes come through as TRUE/FALSE; also accept common
+        // hand-typed marks so plain-text columns work too.
+        if (filterByPrint) {
+          var pv = (row[printIndex] || '').trim().toLowerCase();
+          var isChecked = pv === 'true' || pv === 'yes' || pv === 'y' ||
+                          pv === 'x' || pv === '1' || pv === '✓' || pv === '✔';
+          if (!isChecked) {
+            unprintedCount++;
+            continue;
+          }
+        }
+
+        var cardName;
+        if (hasNameCol) {
+          cardName = (row[nameIndex] || '').trim();
+          if (!cardName) {
+            skippedCount++;
+            continue;
+          }
+        } else {
+          // No name column: every row is a card, keyed by its spreadsheet row
+          // number. Fully-empty rows (e.g. trailing blanks the API returns)
+          // are still skipped so they don't become blank cards.
+          var rowIsEmpty = true;
+          for (var e = 0; e < headers.length; e++) {
+            if ((row[e] || '').trim()) { rowIsEmpty = false; break; }
+          }
+          if (rowIsEmpty) {
+            skippedCount++;
+            continue;
+          }
+          cardName = 'Row ' + (i + 1);
         }
 
         // De-duplicate names by appending (2), (3), etc.
@@ -757,7 +810,13 @@ async function runSync() {
         cardRows.push(obj);
       }
       if (skippedCount > 0) {
-        log('Skipped ' + skippedCount + ' rows with no name in "' + ct.tabName + '".', 'warn');
+        log('Skipped ' + skippedCount + (hasNameCol ? ' rows with no name in "' : ' empty rows in "') + ct.tabName + '".', 'warn');
+      }
+      if (unprintedCount > 0) {
+        log('Print filter: skipped ' + unprintedCount + ' unchecked row(s) in "' + ct.tabName + '".');
+      }
+      if (filterByPrint && cardRows.length === 0) {
+        log('No rows marked "print" in "' + ct.tabName + '" — tab skipped; any existing print frames are left as-is.', 'warn');
       }
 
       sheetData[ct.tabName] = cardRows;
@@ -1184,7 +1243,8 @@ document.getElementById('add-card-type-btn').onclick = function() {
     enabled: true,
     frontComponentKey: '',
     backComponentKey: '',
-    artField: '',
+    frontArtField: '',
+    backArtField: '',
   });
   renderCardTypes();
 };

@@ -6,7 +6,11 @@ interface CardTypeConfig {
   enabled: boolean;
   frontComponentKey: string;
   backComponentKey: string;
-  /** Sheet column whose value keys the art_bank lookup; blank = the card's name. */
+  /** Sheet column whose value keys the art_bank lookup for the front; blank = the card's name. */
+  frontArtField?: string;
+  /** Same, for the back. */
+  backArtField?: string;
+  /** Legacy single art field applied to both sides — superseded by the per-side fields. */
   artField?: string;
 }
 
@@ -288,6 +292,52 @@ async function applyFormatRuns(tn: TextNode, runs: FormatRun[]) {
 }
 
 // ---------------------------------------------------------------------------
+// Shape styling values — "NN%" sets layer opacity, "#RRGGBB[AA]" sets a solid
+// fill. Only applied to non-text layers, so text fields can still print
+// literal percents/hex codes.
+// ---------------------------------------------------------------------------
+
+/** Parse "#RGB", "#RRGGBB", or "#RRGGBBAA" into color + optional alpha. */
+function parseHexColor(tok: string): { color: RGB; alpha?: number } | null {
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(tok);
+  if (!m) return null;
+  let hex = m[1];
+  if (hex.length === 3) hex = hex.split('').map((c) => c + c).join('');
+  const int = (s: string) => parseInt(s, 16) / 255;
+  const out: { color: RGB; alpha?: number } = {
+    color: { r: int(hex.slice(0, 2)), g: int(hex.slice(2, 4)), b: int(hex.slice(4, 6)) },
+  };
+  if (hex.length === 8) out.alpha = int(hex.slice(6, 8));
+  return out;
+}
+
+/** Apply opacity/fill tokens from a cell value to a shape layer.
+ *  Recognizes "NN%" or a bare 0–1 decimal (opacity) and hex colors (fill);
+ *  tokens can be combined ("#ff8800 40%"). Returns true if any token applied. */
+function applyStyleTokens(node: SceneNode, value: string): boolean {
+  let applied = false;
+  for (const tok of value.split(/\s+/)) {
+    const pct = /^(\d+(?:\.\d+)?)%$/.exec(tok);
+    const bare = /^(0?\.\d+|[01])$/.exec(tok);
+    if ((pct || bare) && 'opacity' in node) {
+      const raw = pct ? parseFloat(pct[1]) / 100 : parseFloat(bare![1]);
+      node.opacity = Math.max(0, Math.min(1, raw));
+      applied = true;
+      continue;
+    }
+    const hex = parseHexColor(tok);
+    if (hex && 'fills' in node) {
+      const paint: SolidPaint = hex.alpha !== undefined
+        ? { type: 'SOLID', color: hex.color, opacity: hex.alpha }
+        : { type: 'SOLID', color: hex.color };
+      (node as GeometryMixin).fills = [paint];
+      applied = true;
+    }
+  }
+  return applied;
+}
+
+// ---------------------------------------------------------------------------
 // Populate Fields
 // ---------------------------------------------------------------------------
 
@@ -348,6 +398,17 @@ async function populateInstanceAsync(
     }
     if (value.toLowerCase() === 'hide') {
       node.visible = false;
+      continue;
+    }
+
+    // Shape layers take styling values (opacity %, hex fill) instead of text.
+    if (node.type !== 'TEXT') {
+      if (value && !applyStyleTokens(node, value)) {
+        sendProgress(
+          `"${row.name}": layer #${fieldName} is not text — value "${value}" isn't show/hide, a percent, or a hex color`,
+          'warn'
+        );
+      }
       continue;
     }
 
@@ -681,8 +742,8 @@ async function runSync(payload: RunSyncPayload) {
     for (const row of rows) {
       const fi = frontInstances.get(row.name);
       const bi = backInstances.get(row.name);
-      if (fi) await populateInstanceAsync(fi, row, artBank, ct.artField);
-      if (bi) await populateInstanceAsync(bi, row, artBank, ct.artField);
+      if (fi) await populateInstanceAsync(fi, row, artBank, ct.frontArtField || ct.artField);
+      if (bi) await populateInstanceAsync(bi, row, artBank, ct.backArtField || ct.artField);
     }
 
     // Verification pass — check for instances that failed to populate
